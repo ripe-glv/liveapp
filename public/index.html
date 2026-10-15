@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiveApp</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Tela de entrada -->
+  <section id="login" class="login">
+    <form id="login-form" class="login-card">
+      <div class="logo big" data-logo></div>
+      <h1 data-app-name>LiveApp</h1>
+      <p class="muted" data-tagline></p>
+      <input id="login-name" placeholder="Seu nome" maxlength="32" autocomplete="nickname" required />
+      <input id="login-code" placeholder="Código de acesso" type="password" hidden />
+      <button type="submit" class="btn primary">Entrar</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <main id="app" class="app" hidden>
+    <aside class="sidebar">
+      <header class="brand"><div class="logo" data-logo></div><span data-app-name>LiveApp</span></header>
+      <nav id="channels" class="channels"></nav>
+      <footer class="me"><span class="dot"></span><span id="me-name"></span></footer>
+    </aside>
+
+    <section class="stage">
+      <header class="stage-head">
+        <button id="toggle-sidebar" class="icon-btn only-mobile" title="Canais">☰</button>
+        <h2 id="channel-title">Escolha um canal</h2>
+        <button id="toggle-chat" class="icon-btn only-mobile" title="Chat">💬</button>
+      </header>
+      <div id="empty" class="empty">
+        <p>Clique em um canal à esquerda para entrar na chamada.</p>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="controls" class="controls" hidden>
+        <button id="btn-mic" class="ctrl" title="Microfone (M)">🎙️<span>Mic</span></button>
+        <button id="btn-deaf" class="ctrl" title="Ensurdecer (D)">🎧<span>Som</span></button>
+        <button id="btn-cam" class="ctrl" title="Câmera (V)">📷<span>Câmera</span></button>
+        <button id="btn-screen" class="ctrl" title="Compartilhar tela (S)">🖥️<span>Tela</span></button>
+        <button id="btn-leave" class="ctrl danger" title="Sair do canal">📞<span>Sair</span></button>
+      </div>
+    </section>
+
+    <aside id="chat" class="chat">
+      <header class="chat-head">Chat</header>
+      <ol id="messages" class="messages"></ol>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" placeholder="Entre em um canal para conversar" maxlength="2000" autocomplete="off" disabled />
+      </form>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <div id="audio-sink" hidden></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
