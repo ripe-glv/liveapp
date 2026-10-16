@@ -1,9 +1,8 @@
 // App desktop (Electron). Duas formas de uso, escolhidas na primeira abertura:
 //  - "join": abre o servidor de um amigo (endereço colado pelo usuário);
 //  - "host": sobe o servidor neste PC e mostra o endereço para os amigos.
-const { app, BrowserWindow, session, desktopCapturer, Menu, shell, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, session, desktopCapturer, Menu, shell, ipcMain, dialog } = require('electron');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const brand = require('../brand.config.json');
 
@@ -26,14 +25,6 @@ let serverStarted = false;
 // então o endereço escolhido pelo usuário é marcado como seguro (antes do app iniciar).
 if (config.mode === 'join' && config.serverUrl) {
   try { app.commandLine.appendSwitch('unsafely-treat-insecure-origin-as-secure', new URL(config.serverUrl).origin); } catch { /* ignora */ }
-}
-
-function lanAddresses() {
-  const out = [];
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const i of list || []) if (i.family === 'IPv4' && !i.internal) out.push(i.address);
-  }
-  return out;
 }
 
 function startServer() {
@@ -63,22 +54,12 @@ function showSetup() {
   win.loadFile(path.join(__dirname, 'setup.html'));
 }
 
-async function showHostInfo() {
-  const ips = lanAddresses().map((ip) => `http://${ip}:${DEFAULT_PORT}`);
-  const detail = [
-    'Mesma rede (Wi-Fi/cabo) ou VPN tipo Tailscale/Radmin:',
-    ...(ips.length ? ips : ['(nenhuma rede encontrada)']),
-    '',
-    'Pela internet (com HTTPS), em outro terminal:',
-    `cloudflared tunnel --url http://localhost:${DEFAULT_PORT}`,
-    '',
-    'Mande o endereço que aparecer para os amigos.',
-  ].join('\n');
-  const { response } = await dialog.showMessageBox(win, {
-    type: 'info', title: 'Endereço para os amigos', message: 'Seu servidor está no ar', detail,
-    buttons: ips.length ? ['Copiar primeiro endereço', 'OK'] : ['OK'],
-  });
-  if (ips.length && response === 0) clipboard.writeText(ips[0]);
+// Volta para a tela de escolha de servidor (e desliga o servidor local, se havia um).
+function leaveServer() {
+  config = {};
+  saveConfig(config);
+  app.relaunch();
+  app.exit(0);
 }
 
 function buildMenu() {
@@ -86,8 +67,8 @@ function buildMenu() {
     {
       label: brand.appName,
       submenu: [
-        { label: 'Endereço para os amigos', enabled: config.mode === 'host', click: showHostInfo },
-        { label: 'Trocar servidor / modo', click: () => { config = {}; saveConfig(config); app.relaunch(); app.exit(0); } },
+        { label: 'Convidar amigos / endereço', click: () => win && win.webContents.send('app:open-invite') },
+        { label: 'Sair do servidor', click: leaveServer },
         { type: 'separator' },
         { role: 'reload', label: 'Recarregar' },
         { role: 'toggleDevTools', label: 'Ferramentas de desenvolvedor' },
@@ -118,6 +99,11 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // Pedidos de compartilhamento pendentes não sobrevivem a recarregar a página.
+  win.webContents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) dropPendingShares();
   });
 
   // Se o servidor do amigo estiver fora do ar, volta para a tela de configuração.
@@ -157,8 +143,39 @@ ipcMain.handle('setup:choose', async (_e, { mode, url }) => {
   startServer();
   buildMenu();
   await win.loadURL(`http://localhost:${DEFAULT_PORT}`);
-  showHostInfo();
   return {};
+});
+
+ipcMain.handle('app:leave-server', (e) => {
+  if (win && e.sender === win.webContents) leaveServer();
+});
+
+// ---- Seletor de tela/janela: o site mostra a escolha, aqui só guardamos o pedido pendente.
+const pendingShares = new Map();
+let shareSeq = 0;
+
+function dropPendingShares() {
+  for (const p of pendingShares.values()) p.callback({});
+  pendingShares.clear();
+}
+
+ipcMain.handle('picker:choose', (e, { reqId, sourceId, audio }) => {
+  if (!win || e.sender !== win.webContents) return;
+  const p = pendingShares.get(reqId);
+  if (!p) return;
+  pendingShares.delete(reqId);
+  const source = p.sources.find((s) => s.id === sourceId);
+  if (!source) return p.callback({});
+  // 'loopback' captura todo o som do PC (inclusive a voz dos amigos): só quando a pessoa pedir.
+  p.callback({ video: source, ...(audio && p.audioRequested ? { audio: 'loopback' } : {}) });
+});
+
+ipcMain.handle('picker:cancel', (e, { reqId }) => {
+  if (!win || e.sender !== win.webContents) return;
+  const p = pendingShares.get(reqId);
+  if (!p) return;
+  pendingShares.delete(reqId);
+  p.callback({});
 });
 
 app.whenReady().then(() => {
@@ -167,22 +184,31 @@ app.whenReady().then(() => {
   const allowed = new Set(['media', 'display-capture', 'audioCapture', 'videoCapture']);
   ses.setPermissionRequestHandler((_wc, permission, cb) => cb(allowed.has(permission)));
 
-  // Seletor de tela/janela para o compartilhamento (o Electron não traz um pronto).
-  ses.setDisplayMediaRequestHandler(async (_request, callback) => {
+  // Compartilhamento de tela: envia as telas/janelas (com miniatura) para a interface do site,
+  // que mostra o seletor no tema do app e devolve a escolha por IPC.
+  ses.setDisplayMediaRequestHandler(async (request, callback) => {
     try {
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+      if (!win) return callback({});
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 480, height: 270 },
+        fetchWindowIcons: true,
+      });
       if (!sources.length) return callback({});
-      const menu = Menu.buildFromTemplate([
-        { label: 'Compartilhar:', enabled: false },
-        { type: 'separator' },
-        ...sources.map((s) => ({
-          label: s.name.slice(0, 60),
-          click: () => callback({ video: s, audio: 'loopback' }),
+      const reqId = ++shareSeq;
+      const audioRequested = Boolean(request.audioRequested);
+      pendingShares.set(reqId, { callback, sources, audioRequested });
+      win.webContents.send('picker:sources', {
+        reqId,
+        audioRequested,
+        sources: sources.map((s) => ({
+          id: s.id,
+          name: s.name,
+          type: s.id.startsWith('screen:') ? 'screen' : 'window',
+          thumb: s.thumbnail.toDataURL(),
+          icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null,
         })),
-        { type: 'separator' },
-        { label: 'Cancelar', click: () => callback({}) },
-      ]);
-      menu.popup({ callback: () => {} });
+      });
     } catch {
       callback({});
     }

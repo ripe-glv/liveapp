@@ -52,6 +52,64 @@
     set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* sem armazenamento */ } },
   };
 
+  // ---------- Preferências (ficam só neste computador) ----------
+  const defaults = {
+    mic: '', spk: '', cam: '', ns: true, ec: true, agc: true, vol: 100,
+    res: '1080', fps: '30', bitrate: '3000000', sysaudio: false, accent: '',
+  };
+  const settings = { ...defaults };
+  try { Object.assign(settings, JSON.parse(store.get('liveapp.settings') || '{}')); } catch { /* usa o padrão */ }
+  const saveSettings = () => store.set('liveapp.settings', JSON.stringify(settings));
+
+  function readableOn(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    const lum = 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+    return lum > 150 ? '#111111' : '#ffffff';
+  }
+  function applyAccent() {
+    const root = document.documentElement.style;
+    const c = brand.colors || {};
+    if (settings.accent) {
+      root.setProperty('--accent', settings.accent);
+      root.setProperty('--accent-text', readableOn(settings.accent));
+    } else {
+      if (c.accent) root.setProperty('--accent', c.accent);
+      if (c.accentText) root.setProperty('--accent-text', c.accentText);
+    }
+  }
+  applyAccent();
+
+  // Tenta o dispositivo escolhido; se ele sumiu, cai no padrão do sistema.
+  async function getMicStream() {
+    const base = { echoCancellation: settings.ec, noiseSuppression: settings.ns, autoGainControl: settings.agc };
+    if (settings.mic) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: settings.mic } } });
+      } catch { /* dispositivo indisponível */ }
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: base });
+  }
+  async function getCamStream() {
+    const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } };
+    if (settings.cam) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ video: { ...base, deviceId: { exact: settings.cam } } });
+      } catch { /* dispositivo indisponível */ }
+    }
+    return navigator.mediaDevices.getUserMedia({ video: base });
+  }
+
+  function applyOutput(video) {
+    video.volume = Math.min(1, Math.max(0, Number(settings.vol) / 100));
+    if (settings.spk && typeof video.setSinkId === 'function') video.setSinkId(settings.spk).catch(() => {});
+  }
+  function applyOutputAll() {
+    for (const p of state.peers.values()) {
+      applyOutput(p.tile.video);
+      if (p.screenTile) applyOutput(p.screenTile.video);
+    }
+  }
+
   // ---------- Login ----------
   $('#login-name').value = store.get('liveapp.name');
   $('#login-form').addEventListener('submit', async (e) => {
@@ -65,6 +123,7 @@
     $('#app').hidden = false;
     $('#me-name').textContent = state.me.name;
     renderChannels({});
+    maybeAutoInvite();
   });
 
   function login(name, code) {
@@ -103,9 +162,7 @@
   async function ensureMic() {
     if (state.micTrack) return true;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      const s = await getMicStream();
       state.micTrack = s.getAudioTracks()[0];
       state.micTrack.enabled = state.micWanted && !state.deaf;
       localCam.addTrack(state.micTrack);
@@ -122,9 +179,7 @@
     if (!state.channel) return;
     if (state.camTrack) return stopCam();
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-      });
+      const s = await getCamStream();
       state.camTrack = s.getVideoTracks()[0];
       state.camTrack.onended = stopCam;
       localCam.addTrack(state.camTrack);
@@ -148,9 +203,10 @@
     if (!state.channel) return;
     if (state.screenTracks.length) return stopScreen();
     try {
+      const height = settings.res === 'source' ? null : Number(settings.res);
       const s = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30 } },
-        audio: true,
+        video: { frameRate: { ideal: Number(settings.fps) || 30 }, ...(height ? { height: { ideal: height } } : {}) },
+        audio: Boolean(settings.sysaudio),
       });
       for (const t of s.getTracks()) {
         if (t.kind === 'video') { t.contentHint = 'detail'; t.onended = stopScreen; }
@@ -186,7 +242,7 @@
       try {
         const p = sender.getParameters();
         if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-        p.encodings[0].maxBitrate = 3_000_000;
+        p.encodings[0].maxBitrate = Number(settings.bitrate) || 3_000_000;
         sender.setParameters(p).catch(() => {});
       } catch { /* aplicado na renegociação */ }
     }
@@ -233,7 +289,13 @@
     el.append(video, avatar, label);
     el.addEventListener('click', () => toggleFocus(el));
     grid.append(el);
-    return { el, video, flags, analyser: null, stream: null };
+    const tile = { el, video, flags, analyser: null, stream: null };
+    tile.setName = (n) => {
+      labelText.textContent = screen ? `${n} (tela)` : n;
+      avatar.textContent = initial(n);
+    };
+    if (!muted) applyOutput(video);
+    return tile;
   }
 
   function toggleFocus(el) {
@@ -417,6 +479,13 @@
     if (peer) addSystem(`${peer.name} saiu`);
     closePeer(id);
   });
+  socket.on('peer-renamed', ({ id, name }) => {
+    const peer = state.peers.get(id);
+    if (!peer) return;
+    peer.name = name;
+    peer.tile.setName(name);
+    if (peer.screenTile) peer.screenTile.setName(name);
+  });
   socket.on('peer-media', ({ id, media }) => {
     const peer = state.peers.get(id);
     if (!peer) return;
@@ -455,9 +524,7 @@
   async function ensureMicDeferred() {
     if (state.micTrack) return;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      const s = await getMicStream();
       state.micTrack = s.getAudioTracks()[0];
       state.micTrack.enabled = state.micWanted && !state.deaf;
       localCam.addTrack(state.micTrack);
@@ -524,7 +591,8 @@
   $('#btn-leave').addEventListener('click', () => leave(false));
 
   document.addEventListener('keydown', (e) => {
-    if (!state.channel || e.target.matches('input, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!state.channel || e.target.matches('input, textarea, select') || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (document.querySelector('.modal:not([hidden])')) return;
     const k = e.key.toLowerCase();
     if (k === 'm') toggleMic();
     else if (k === 'd') toggleDeaf();
@@ -575,6 +643,354 @@
   // ---------- Celular ----------
   $('#toggle-sidebar').addEventListener('click', () => $('.sidebar').classList.toggle('open'));
   $('#toggle-chat').addEventListener('click', () => $('#chat').classList.toggle('open'));
+
+  // ---------- Janelas ----------
+  let inviteTimer = null;
+  function openModal(el) { el.hidden = false; }
+  function closeModal(el) {
+    el.hidden = true;
+    if (el.id === 'invite') { clearInterval(inviteTimer); inviteTimer = null; }
+  }
+  document.querySelectorAll('.modal').forEach((m) => {
+    // O seletor de tela só fecha pelos botões, para não perder a escolha sem querer.
+    m.addEventListener('mousedown', (e) => { if (e.target === m && m.id !== 'picker') closeModal(m); });
+    m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => closeModal(m)));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = [...document.querySelectorAll('.modal')].find((m) => !m.hidden);
+    if (!open) return;
+    if (open.id === 'picker') cancelPicker();
+    else closeModal(open);
+  });
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const t = document.createElement('textarea');
+      t.value = text;
+      document.body.append(t);
+      t.select();
+      document.execCommand('copy');
+      t.remove();
+    }
+    toast('Copiado!');
+  }
+
+  // ---------- Convidar (endereços ao vivo) ----------
+  const isLocalHost = (h) => h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+  const isSecureUrl = (u) => u.startsWith('https://') || /^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(u);
+  let inviteSnapshot = '';
+
+  async function refreshInvite() {
+    if (!state.me) return;
+    let info = null;
+    try {
+      const r = await fetch(`/server-info?id=${encodeURIComponent(state.me.id)}`);
+      if (r.ok) info = await r.json();
+    } catch { /* offline: mantém a lista atual */ }
+
+    const rows = [];
+    const origin = location.origin;
+    const local = isLocalHost(location.hostname);
+    rows.push({
+      title: local ? 'Neste computador (só funciona aqui)' : 'Endereço que você está usando',
+      url: origin,
+      tag: local ? '' : 'recomendado',
+      copy: !local,
+    });
+    for (const a of (info && info.addresses) || []) {
+      if (a.url === origin) continue;
+      rows.push({ title: `${a.label} · ${a.iface}`, url: a.url, tag: '', copy: true });
+    }
+
+    const snapshot = JSON.stringify(rows) + (info ? info.online : '');
+    if (snapshot !== inviteSnapshot) {
+      inviteSnapshot = snapshot;
+      const list = $('#invite-list');
+      list.textContent = '';
+      for (const r of rows) {
+        const li = document.createElement('li');
+        li.className = 'addr';
+        const what = document.createElement('div');
+        what.className = 'what';
+        const b = document.createElement('b');
+        b.textContent = r.title;
+        if (r.tag) {
+          const tag = document.createElement('span');
+          tag.className = 'tag';
+          tag.textContent = r.tag;
+          b.append(tag);
+        }
+        const code = document.createElement('code');
+        code.textContent = r.url;
+        what.append(b, code);
+        li.append(what);
+        if (r.copy) {
+          const c = document.createElement('button');
+          c.className = 'btn';
+          c.textContent = 'Copiar';
+          c.addEventListener('click', () => copyText(r.url));
+          li.append(c);
+        }
+        list.append(li);
+      }
+    }
+
+    const hasPlain = rows.some((r) => r.copy && !isSecureUrl(r.url));
+    const hints = [];
+    if (info && !info.addresses.length) hints.push('Nenhuma rede encontrada. Conecte-se ao Wi-Fi, cabo ou a uma VPN.');
+    if (hasPlain) {
+      hints.push(
+        'Endereços http:// funcionam no app LiveApp. No navegador, microfone e câmera exigem HTTPS: ' +
+        'para amigos de fora, rode "cloudflared tunnel --url http://localhost:' + (info ? info.port : 3000) + '" e mande o link https.'
+      );
+    }
+    $('#invite-hint').textContent = hints.join(' ');
+  }
+
+  function openInvite() {
+    if (!state.me) return;
+    inviteSnapshot = '';
+    openModal($('#invite'));
+    refreshInvite();
+    clearInterval(inviteTimer);
+    inviteTimer = setInterval(refreshInvite, 4000);
+  }
+  $('#btn-invite').addEventListener('click', openInvite);
+  window.addEventListener('liveapp:open-invite', openInvite);
+
+  // No app de desktop de quem hospeda, mostra o convite uma vez após o primeiro login.
+  function maybeAutoInvite() {
+    if (!window.desktop || !isLocalHost(location.hostname) || store.get('liveapp.inviteShown')) return;
+    store.set('liveapp.inviteShown', '1');
+    setTimeout(openInvite, 400);
+  }
+
+  // ---------- Configurações ----------
+  const setEl = {
+    name: $('#set-name'), mic: $('#set-mic'), spk: $('#set-spk'), cam: $('#set-cam'), vol: $('#set-vol'),
+    ns: $('#set-ns'), ec: $('#set-ec'), agc: $('#set-agc'), res: $('#set-res'), fps: $('#set-fps'),
+    bitrate: $('#set-bitrate'), sysaudio: $('#set-sysaudio'), accent: $('#set-accent'),
+  };
+
+  function selectTab(name) {
+    document.querySelectorAll('#settings-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+    document.querySelectorAll('#settings [data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
+  }
+  document.querySelectorAll('#settings-tabs button').forEach((b) => b.addEventListener('click', () => selectTab(b.dataset.tab)));
+
+  async function fillDevices() {
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch { /* sem permissão */ }
+    const fill = (select, kind, current, noun) => {
+      select.textContent = '';
+      const def = new Option('Padrão do sistema', '');
+      select.append(def);
+      devices.filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+        .forEach((d, i) => select.append(new Option(d.label || `${noun} ${i + 1}`, d.deviceId)));
+      select.value = [...select.options].some((o) => o.value === current) ? current : '';
+    };
+    fill(setEl.mic, 'audioinput', settings.mic, 'Microfone');
+    fill(setEl.spk, 'audiooutput', settings.spk, 'Saída');
+    fill(setEl.cam, 'videoinput', settings.cam, 'Câmera');
+    setEl.spk.disabled = typeof HTMLMediaElement.prototype.setSinkId !== 'function';
+  }
+
+  async function openSettings() {
+    setEl.name.value = state.me ? state.me.name : '';
+    setEl.vol.value = settings.vol;
+    for (const k of ['ns', 'ec', 'agc', 'sysaudio']) setEl[k].checked = Boolean(settings[k]);
+    for (const k of ['res', 'fps', 'bitrate']) setEl[k].value = String(settings[k]);
+    setEl.accent.value = settings.accent || (getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#5865f2');
+    $('#set-server').value = location.origin;
+    const host = window.desktop && isLocalHost(location.hostname);
+    $('#leave-server-hint').textContent = window.desktop
+      ? (host ? 'Você hospeda este servidor: sair o desliga para todos e volta para a tela de escolha.'
+              : 'Volta para a tela de escolha de servidor do app.')
+      : 'Você será desconectado e volta para a tela de entrada.';
+    $('#set-server-meta').textContent = '';
+    selectTab('profile');
+    openModal($('#settings'));
+    fillDevices();
+    try {
+      const r = await fetch(`/server-info?id=${encodeURIComponent(state.me.id)}`);
+      if (r.ok) {
+        const info = await r.json();
+        $('#set-server-meta').textContent = `${info.name} · ${info.online} ${info.online === 1 ? 'pessoa conectada' : 'pessoas conectadas'}`;
+      }
+    } catch { /* ignora */ }
+  }
+  $('#btn-settings').addEventListener('click', openSettings);
+
+  // Troca o microfone sem derrubar a chamada.
+  async function switchMic() {
+    const old = state.micTrack;
+    if (!old) return;
+    let stream;
+    try { stream = await getMicStream(); } catch { toast('Não consegui trocar o microfone.'); return; }
+    const next = stream.getAudioTracks()[0];
+    next.enabled = old.enabled;
+    localCam.removeTrack(old);
+    localCam.addTrack(next);
+    for (const peer of state.peers.values()) {
+      const sender = peer.senders.get(old);
+      peer.senders.delete(old);
+      if (sender) {
+        sender.replaceTrack(next).catch(() => {});
+        peer.senders.set(next, sender);
+      }
+    }
+    old.stop();
+    state.micTrack = next;
+    if (selfTile) {
+      speakers.delete(selfTile);
+      selfTile.analyser = null;
+      watchSpeaking(selfTile, new MediaStream([next]), () => state.micTrack && state.micTrack.enabled);
+    }
+  }
+
+  setEl.mic.addEventListener('change', () => { settings.mic = setEl.mic.value; saveSettings(); switchMic(); });
+  setEl.spk.addEventListener('change', () => { settings.spk = setEl.spk.value; saveSettings(); applyOutputAll(); });
+  setEl.cam.addEventListener('change', async () => {
+    settings.cam = setEl.cam.value;
+    saveSettings();
+    if (state.camTrack) { stopCam(); await toggleCam(); }
+  });
+  setEl.vol.addEventListener('input', () => { settings.vol = Number(setEl.vol.value); saveSettings(); applyOutputAll(); });
+  for (const k of ['ns', 'ec', 'agc']) {
+    setEl[k].addEventListener('change', async () => {
+      settings[k] = setEl[k].checked;
+      saveSettings();
+      if (!state.micTrack) return;
+      try {
+        await state.micTrack.applyConstraints({
+          echoCancellation: settings.ec, noiseSuppression: settings.ns, autoGainControl: settings.agc,
+        });
+      } catch { switchMic(); }
+    });
+  }
+  for (const k of ['res', 'fps', 'bitrate']) {
+    setEl[k].addEventListener('change', () => { settings[k] = setEl[k].value; saveSettings(); });
+  }
+  setEl.sysaudio.addEventListener('change', () => { settings.sysaudio = setEl.sysaudio.checked; saveSettings(); });
+  setEl.accent.addEventListener('input', () => { settings.accent = setEl.accent.value; saveSettings(); applyAccent(); });
+  $('#set-accent-reset').addEventListener('click', () => {
+    settings.accent = '';
+    saveSettings();
+    applyAccent();
+    setEl.accent.value = (brand.colors && brand.colors.accent) || '#5865f2';
+  });
+
+  $('#set-name-save').addEventListener('click', () => {
+    const name = setEl.name.value.trim();
+    if (!name) return;
+    socket.emit('rename', { name }, (res) => {
+      if (res.error) { toast(res.error); return; }
+      state.me.name = res.name;
+      store.set('liveapp.name', res.name);
+      $('#me-name').textContent = res.name;
+      if (selfTile) {
+        selfTile.setName(res.name + ' (você)');
+        if (selfTile.screen) selfTile.screen.setName(res.name);
+      }
+      toast('Nome atualizado.');
+    });
+  });
+
+  $('#set-server-copy').addEventListener('click', () => copyText(location.origin));
+  $('#btn-leave-server').addEventListener('click', () => {
+    const hosting = window.desktop && isLocalHost(location.hostname);
+    const ask = hosting
+      ? 'Você está hospedando este servidor. Sair vai desligá-lo para todos. Continuar?'
+      : 'Sair deste servidor?';
+    if (!confirm(ask)) return;
+    leave(true);
+    if (window.desktop && window.desktop.leaveServer) { window.desktop.leaveServer(); return; }
+    socket.disconnect();
+    location.reload();
+  });
+
+  // ---------- Escolher tela ou aplicativo (app de desktop) ----------
+  let pickerReq = null;
+  let pickerTab = 'screen';
+  let pickerSel = null;
+
+  function renderPicker() {
+    const grid = $('#picker-grid');
+    grid.textContent = '';
+    document.querySelectorAll('#picker [data-ptab]').forEach((b) => b.classList.toggle('active', b.dataset.ptab === pickerTab));
+    const items = pickerReq.sources.filter((s) => s.type === pickerTab);
+    if (!items.length) {
+      const p = document.createElement('p');
+      p.className = 'picker-empty';
+      p.textContent = pickerTab === 'screen' ? 'Nenhuma tela encontrada.' : 'Nenhum aplicativo aberto encontrado.';
+      grid.append(p);
+    }
+    for (const s of items) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'source' + (pickerSel === s.id ? ' selected' : '');
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb';
+      thumb.style.backgroundImage = `url("${s.thumb}")`;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      if (s.icon) {
+        const img = document.createElement('img');
+        img.src = s.icon;
+        img.alt = '';
+        meta.append(img);
+      }
+      const name = document.createElement('span');
+      name.textContent = s.name;
+      name.title = s.name;
+      meta.append(name);
+      card.append(thumb, meta);
+      card.addEventListener('click', () => {
+        pickerSel = s.id;
+        $('#picker-go').disabled = false;
+        grid.querySelectorAll('.source').forEach((c) => c.classList.toggle('selected', c === card));
+      });
+      card.addEventListener('dblclick', confirmPicker);
+      grid.append(card);
+    }
+  }
+
+  function showPicker(req) {
+    if (pickerReq) window.desktop.cancelPick(pickerReq.reqId);
+    pickerReq = req;
+    pickerSel = null;
+    pickerTab = req.sources.some((s) => s.type === 'screen') ? 'screen' : 'window';
+    $('#picker-go').disabled = true;
+    $('#picker-audio-wrap').hidden = !req.audioRequested;
+    $('#picker-audio').checked = Boolean(settings.sysaudio);
+    renderPicker();
+    openModal($('#picker'));
+  }
+  function confirmPicker() {
+    if (!pickerReq || !pickerSel) return;
+    window.desktop.pickSource(pickerReq.reqId, pickerSel, $('#picker-audio').checked);
+    pickerReq = null;
+    closeModal($('#picker'));
+  }
+  function cancelPicker() {
+    if (pickerReq) window.desktop.cancelPick(pickerReq.reqId);
+    pickerReq = null;
+    closeModal($('#picker'));
+  }
+  document.querySelectorAll('#picker [data-ptab]').forEach((b) => b.addEventListener('click', () => {
+    if (!pickerReq) return;
+    pickerTab = b.dataset.ptab;
+    pickerSel = null;
+    $('#picker-go').disabled = true;
+    renderPicker();
+  }));
+  $('#picker-go').addEventListener('click', confirmPicker);
+  $('#picker-cancel').addEventListener('click', cancelPicker);
+  $('#picker-x').addEventListener('click', cancelPicker);
+  if (window.desktop && window.desktop.onPickSources) window.desktop.onPickSources(showPicker);
 
   // ---------- Reconexão ----------
   let wasConnected = false;

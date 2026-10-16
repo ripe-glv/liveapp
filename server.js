@@ -1,5 +1,6 @@
 // Servidor: entrega o site, guarda o chat em memória e repassa a sinalização WebRTC.
 // A mídia (voz/câmera/tela) vai direto entre os navegadores (P2P), não passa por aqui.
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const express = require('express');
@@ -24,6 +25,38 @@ app.get('/brand.json', (_req, res) => {
 const history = Object.fromEntries(brand.channels.map((c) => [c, []]));
 // socket.id -> { name, channel, media: { mic, cam, screen } }
 const users = new Map();
+
+// Endereços em que este servidor pode ser alcançado, lidos a cada pedido
+// (o IP muda quando a pessoa troca de rede, liga uma VPN etc.).
+function classifyAddress(ip, ifaceName) {
+  const [a, b] = ip.split('.').map(Number);
+  if (a === 169 && b === 254) return null; // sem rede de verdade (link-local)
+  // Adaptadores de máquinas virtuais/contêineres: não são alcançáveis por amigos.
+  if (/virtualbox|vmware|vmnet|vethernet|hyper-v|wsl|docker|loopback/i.test(ifaceName)) return null;
+  if ((a === 192 && b === 56) || (a === 192 && b === 99) || (a === 172 && b === 17)) return null;
+  if (a === 100 && b >= 64 && b <= 127) return { label: 'VPN (Tailscale)', rank: 1 };
+  if (/tailscale|zerotier|radmin|hamachi|wireguard|vpn/i.test(ifaceName)) return { label: 'VPN', rank: 1 };
+  if (a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)) return { label: 'Rede local', rank: 0 };
+  return { label: 'Outra rede', rank: 2 };
+}
+
+function lanAddresses() {
+  const out = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
+    for (const i of list || []) {
+      if (i.family !== 'IPv4' || i.internal) continue;
+      const kind = classifyAddress(i.address, name);
+      if (kind) out.push({ ip: i.address, iface: name, label: kind.label, rank: kind.rank, url: `http://${i.address}:${PORT}` });
+    }
+  }
+  return out.sort((x, y) => x.rank - y.rank);
+}
+
+// Só quem já entrou (tem sessão) vê os endereços da máquina.
+app.get('/server-info', (req, res) => {
+  if (!users.has(String(req.query.id || ''))) return res.status(403).json({ error: 'Entre primeiro.' });
+  res.json({ name: brand.appName, port: PORT, online: users.size, addresses: lanAddresses() });
+});
 
 function channelMembers(channel) {
   return [...users.entries()]
@@ -84,6 +117,16 @@ io.on('connection', (socket) => {
     h.push(msg);
     if (h.length > HISTORY_LIMIT) h.shift();
     io.to(u.channel).emit('chat', msg);
+  });
+
+  socket.on('rename', ({ name }, ack) => {
+    const u = users.get(socket.id);
+    const clean = String(name || '').trim().slice(0, 32);
+    if (!u || !clean) return ack({ error: 'Nome inválido.' });
+    u.name = clean;
+    if (u.channel) socket.to(u.channel).emit('peer-renamed', { id: socket.id, name: clean });
+    broadcastPresence();
+    ack({ ok: true, name: clean });
   });
 
   socket.on('media', (media) => {
