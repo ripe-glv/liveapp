@@ -1,6 +1,6 @@
 {
   "name": "liveapp",
-  "version": "1.0.0",
+  "version": "0.0.3",
   "private": true,
   "description": "App white label de chat, voz, câmera e compartilhamento de tela (web + desktop).",
   "author": "LiveApp",
@@ -11,6 +11,7 @@
     "dist": "electron-builder --win portable nsis"
   },
   "dependencies": {
+    "cloudflared": "^0.7.3",
     "express": "^4.21.2",
     "socket.io": "^4.8.1"
   },
@@ -21,7 +22,9 @@
   "build": {
     "appId": "app.liveapp.desktop",
     "productName": "LiveApp",
-    "directories": { "output": "dist" },
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "desktop/**/*",
       "public/**/*",
@@ -30,9 +33,18 @@
       "package.json"
     ],
     "win": {
-      "target": ["portable", "nsis"],
+      "target": [
+        "portable",
+        "nsis"
+      ],
       "signAndEditExecutable": false
     },
-    "nsis": { "oneClick": true, "perMachine": false }
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "asarUnpack": [
+      "node_modules/cloudflared/bin/**"
+    ]
   }
 }

@@ -47,6 +47,7 @@
         <button id="btn-deaf" class="ctrl" title="Ensurdecer (D)">🎧<span>Som</span></button>
         <button id="btn-cam" class="ctrl" title="Câmera (V)">📷<span>Câmera</span></button>
         <button id="btn-screen" class="ctrl" title="Compartilhar tela (S)">🖥️<span>Tela</span></button>
+        <button id="btn-full" class="ctrl" title="Tela cheia (F)">⛶<span>Tela cheia</span></button>
         <button id="btn-leave" class="ctrl danger" title="Sair do canal">📞<span>Sair</span></button>
       </div>
     </section>
@@ -71,6 +72,7 @@
       <div class="modal-body">
         <p class="muted small">Mande um destes endereços. A lista acompanha sua rede: se o IP mudar, ela muda junto.</p>
         <ul id="invite-list" class="addr-list"></ul>
+        <div id="invite-actions" class="invite-actions"></div>
         <p id="invite-hint" class="hint small"></p>
       </div>
     </div>
@@ -88,6 +90,7 @@
           <button data-tab="profile" class="active">Perfil</button>
           <button data-tab="av">Áudio e vídeo</button>
           <button data-tab="share">Tela</button>
+          <button data-tab="keys">Atalhos</button>
           <button data-tab="look">Aparência</button>
           <button data-tab="server">Servidor</button>
         </nav>
@@ -137,6 +140,16 @@
             </label>
             <label class="check"><input type="checkbox" id="set-sysaudio" /> Compartilhar áudio do sistema por padrão</label>
             <p class="hint small">Com o áudio do sistema ligado, os amigos também ouvem o som do seu PC. Use fones para não gerar eco. As mudanças valem na próxima vez que você compartilhar.</p>
+          </section>
+
+          <section data-panel="keys" hidden>
+            <p class="muted small">Clique em <b>Alterar</b> e aperte a combinação que quiser (Esc cancela). Teclas soltas só valem fora das caixas de texto.</p>
+            <ul id="keys-list" class="keys-list"></ul>
+            <label class="check" id="set-global-wrap">
+              <input type="checkbox" id="set-global" /> Atalhos globais: funcionam com o app em segundo plano
+            </label>
+            <p class="hint small">Os globais só valem para combinações com Ctrl, Alt ou Win (uma tecla solta atrapalharia o resto do sistema).</p>
+            <button id="keys-reset" class="btn">Restaurar padrão</button>
           </section>
 
           <section data-panel="look" hidden>

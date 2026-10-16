@@ -240,3 +240,32 @@ input[type="color"] { width: 56px; height: 38px; padding: 2px; background: var(-
   .settings { grid-template-columns: 1fr; gap: 10px; }
   .settings .tabs { flex-direction: row; overflow-x: auto; }
 }
+
+.invite-actions { margin-top: 12px; display: flex; }
+.invite-actions .btn { flex: 1; padding: 10px 14px; }
+
+/* ---------- Tela cheia ---------- */
+.tile-fs {
+  position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; border: 0; border-radius: 8px;
+  background: rgba(0, 0, 0, .6); color: #fff; cursor: pointer; display: grid; place-items: center;
+  opacity: 0; transition: opacity .12s;
+}
+.tile:hover .tile-fs, .tile-fs:focus-visible { opacity: 1; }
+.tile-fs:hover { background: var(--accent); color: var(--accent-text); }
+@media (hover: none) { .tile-fs { opacity: 1; } }
+.tile:fullscreen { aspect-ratio: auto; width: 100%; height: 100%; border-radius: 0; outline: none; background: #000; }
+.tile:fullscreen video { object-fit: contain; }
+.tile:fullscreen .label { font-size: 15px; bottom: 16px; left: 16px; }
+.tile:fullscreen .tile-fs { top: 16px; right: 16px; }
+
+/* ---------- Atalhos ---------- */
+.keys-list { list-style: none; margin: 14px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.key-row { display: flex; align-items: center; gap: 8px; background: var(--panel-alt); border-radius: 10px; padding: 8px 10px; }
+.key-name { flex: 1; min-width: 0; }
+.key-row .btn { padding: 6px 10px; font-size: 13px; background: var(--bg); }
+kbd {
+  min-width: 96px; text-align: center; font: 600 13px/1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  background: var(--bg); border: 1px solid var(--muted); border-bottom-width: 3px; border-radius: 6px; padding: 7px 10px;
+}
+kbd.recording { border-color: var(--accent); color: var(--accent); animation: pulse 1.2s infinite; }
+#set-global-wrap { margin-top: 4px; }

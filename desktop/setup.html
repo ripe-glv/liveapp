@@ -37,17 +37,28 @@
 
     <div class="opt">
       <h2>Hospedar para os amigos</h2>
-      <p>Este computador vira o servidor. Depois eu mostro o endereço para você mandar.</p>
+      <p>Este computador vira o servidor. Dentro do app você gera um link público para mandar aos amigos, sem VPN.</p>
       <button id="host">Hospedar aqui</button>
     </div>
   </div>
   <script>
     const err = document.getElementById('err');
-    document.getElementById('join').onclick = async () => {
+    document.getElementById('join').onclick = async (ev) => {
+      const b = ev.currentTarget;
+      err.textContent = '';
+      b.disabled = true; b.textContent = 'Conectando…';
       const res = await window.setup.choose({ mode: 'join', url: document.getElementById('url').value });
+      b.disabled = false; b.textContent = 'Entrar';
       if (res && res.error) err.textContent = res.error;
     };
-    document.getElementById('host').onclick = () => window.setup.choose({ mode: 'host' });
+    document.getElementById('host').onclick = async (ev) => {
+      const b = ev.currentTarget;
+      err.textContent = '';
+      b.disabled = true; b.textContent = 'Iniciando…';
+      const res = await window.setup.choose({ mode: 'host' });
+      b.disabled = false; b.textContent = 'Hospedar aqui';
+      if (res && res.error) err.textContent = res.error;
+    };
     window.setup.current().then((c) => { if (c && c.serverUrl) document.getElementById('url').value = c.serverUrl; });
   </script>
 </body>
