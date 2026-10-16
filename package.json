@@ -1,0 +1,38 @@
+{
+  "name": "liveapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "App white label de chat, voz, câmera e compartilhamento de tela (web + desktop).",
+  "author": "LiveApp",
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "desktop": "electron .",
+    "dist": "electron-builder --win portable nsis"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "app.liveapp.desktop",
+    "productName": "LiveApp",
+    "directories": { "output": "dist" },
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "server.js",
+      "brand.config.json",
+      "package.json"
+    ],
+    "win": {
+      "target": ["portable", "nsis"],
+      "signAndEditExecutable": false
+    },
+    "nsis": { "oneClick": true, "perMachine": false }
+  }
+}

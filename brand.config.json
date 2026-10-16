@@ -1,0 +1,24 @@
+{
+  "appName": "LiveApp",
+  "tagline": "Voz, câmera e tela com a galera",
+  "logoText": "LA",
+  "logoUrl": "",
+  "colors": {
+    "accent": "#5865f2",
+    "accentText": "#ffffff",
+    "bg": "#1e1f22",
+    "panel": "#2b2d31",
+    "panelAlt": "#313338",
+    "text": "#e3e5e8",
+    "muted": "#949ba4",
+    "danger": "#da373c",
+    "success": "#23a55a"
+  },
+  "channels": ["geral", "jogos", "musica"],
+  "accessCode": "",
+  "maxPeersPerChannel": 6,
+  "serverUrl": "http://localhost:3000",
+  "iceServers": [
+    { "urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
+  ]
+}

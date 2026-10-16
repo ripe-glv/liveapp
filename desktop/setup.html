@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+  <title>Configurar</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #1e1f22; color: #e3e5e8;
+           font: 15px/1.45 system-ui, "Segoe UI", sans-serif; padding: 16px; box-sizing: border-box; }
+    .card { width: 100%; max-width: 440px; background: #2b2d31; border-radius: 16px; padding: 28px 24px; }
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    p { margin: 0 0 16px; color: #949ba4; }
+    .opt { background: #313338; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+    .opt h2 { margin: 0 0 4px; font-size: 15px; }
+    .opt p { margin: 0 0 10px; font-size: 13px; }
+    input { width: 100%; box-sizing: border-box; background: #1e1f22; border: 1px solid transparent; border-radius: 8px;
+            padding: 10px 12px; color: inherit; font: inherit; margin-bottom: 8px; }
+    input:focus { outline: none; border-color: #5865f2; }
+    button { background: #5865f2; color: #fff; border: 0; border-radius: 8px; padding: 10px 14px; font: inherit;
+             font-weight: 600; cursor: pointer; width: 100%; }
+    .err { color: #da373c; min-height: 1.2em; margin: 4px 0 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">Como você quer usar?</h1>
+    <p>Escolha uma vez. Dá para trocar depois no menu (tecla Alt).</p>
+
+    <div class="opt">
+      <h2>Entrar no servidor de um amigo</h2>
+      <p>Cole o endereço que ele te mandou (ex.: https://algo.trycloudflare.com).</p>
+      <input id="url" placeholder="https://..." autocomplete="off" />
+      <button id="join">Entrar</button>
+      <p class="err" id="err"></p>
+    </div>
+
+    <div class="opt">
+      <h2>Hospedar para os amigos</h2>
+      <p>Este computador vira o servidor. Depois eu mostro o endereço para você mandar.</p>
+      <button id="host">Hospedar aqui</button>
+    </div>
+  </div>
+  <script>
+    const err = document.getElementById('err');
+    document.getElementById('join').onclick = async () => {
+      const res = await window.setup.choose({ mode: 'join', url: document.getElementById('url').value });
+      if (res && res.error) err.textContent = res.error;
+    };
+    document.getElementById('host').onclick = () => window.setup.choose({ mode: 'host' });
+    window.setup.current().then((c) => { if (c && c.serverUrl) document.getElementById('url').value = c.serverUrl; });
+  </script>
+</body>
+</html>

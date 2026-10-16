@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiveApp</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Tela de entrada -->
+  <section id="login" class="login">
+    <form id="login-form" class="login-card">
+      <div class="logo big" data-logo></div>
+      <h1 data-app-name>LiveApp</h1>
+      <p class="muted" data-tagline></p>
+      <input id="login-name" placeholder="Seu nome" maxlength="32" autocomplete="nickname" required />
+      <input id="login-code" placeholder="Código de acesso" type="password" hidden />
+      <button type="submit" class="btn primary">Entrar</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <main id="app" class="app" hidden>
+    <aside class="sidebar">
+      <header class="brand"><div class="logo" data-logo></div><span data-app-name>LiveApp</span></header>
+      <nav id="channels" class="channels"></nav>
+      <footer class="me">
+        <span class="dot"></span><span id="me-name" class="me-name"></span>
+        <button id="btn-invite" class="icon-btn" title="Convidar amigos / endereço do servidor" aria-label="Convidar">🔗</button>
+        <button id="btn-settings" class="icon-btn" title="Configurações" aria-label="Configurações">⚙️</button>
+      </footer>
+    </aside>
+
+    <section class="stage">
+      <header class="stage-head">
+        <button id="toggle-sidebar" class="icon-btn only-mobile" title="Canais">☰</button>
+        <h2 id="channel-title">Escolha um canal</h2>
+        <button id="toggle-chat" class="icon-btn only-mobile" title="Chat">💬</button>
+      </header>
+      <div id="empty" class="empty">
+        <p>Clique em um canal à esquerda para entrar na chamada.</p>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="controls" class="controls" hidden>
+        <button id="btn-mic" class="ctrl" title="Microfone (M)">🎙️<span>Mic</span></button>
+        <button id="btn-deaf" class="ctrl" title="Ensurdecer (D)">🎧<span>Som</span></button>
+        <button id="btn-cam" class="ctrl" title="Câmera (V)">📷<span>Câmera</span></button>
+        <button id="btn-screen" class="ctrl" title="Compartilhar tela (S)">🖥️<span>Tela</span></button>
+        <button id="btn-leave" class="ctrl danger" title="Sair do canal">📞<span>Sair</span></button>
+      </div>
+    </section>
+
+    <aside id="chat" class="chat">
+      <header class="chat-head">Chat</header>
+      <ol id="messages" class="messages"></ol>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" placeholder="Entre em um canal para conversar" maxlength="2000" autocomplete="off" disabled />
+      </form>
+    </aside>
+  </main>
+
+  <!-- Convidar: endereços do servidor, atualizados sozinhos -->
+  <div id="invite" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="invite-title">
+      <header class="modal-head">
+        <h3 id="invite-title">Convidar amigos</h3>
+        <span id="invite-live" class="live" title="Atualiza sozinho">ao vivo</span>
+        <button class="icon-btn" data-close aria-label="Fechar">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="muted small">Mande um destes endereços. A lista acompanha sua rede: se o IP mudar, ela muda junto.</p>
+        <ul id="invite-list" class="addr-list"></ul>
+        <p id="invite-hint" class="hint small"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Configurações -->
+  <div id="settings" class="modal" hidden>
+    <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="modal-head">
+        <h3 id="settings-title">Configurações</h3>
+        <button class="icon-btn" data-close aria-label="Fechar">✕</button>
+      </header>
+      <div class="modal-body settings">
+        <nav class="tabs" id="settings-tabs">
+          <button data-tab="profile" class="active">Perfil</button>
+          <button data-tab="av">Áudio e vídeo</button>
+          <button data-tab="share">Tela</button>
+          <button data-tab="look">Aparência</button>
+          <button data-tab="server">Servidor</button>
+        </nav>
+
+        <div class="panels">
+          <section data-panel="profile">
+            <label class="field">Nome de exibição
+              <span class="row">
+                <input id="set-name" maxlength="32" autocomplete="off" />
+                <button id="set-name-save" class="btn primary">Salvar</button>
+              </span>
+            </label>
+          </section>
+
+          <section data-panel="av" hidden>
+            <label class="field">Microfone <select id="set-mic"></select></label>
+            <label class="field">Saída de áudio <select id="set-spk"></select></label>
+            <label class="field">Volume de saída <input id="set-vol" type="range" min="0" max="100" /></label>
+            <label class="field">Câmera <select id="set-cam"></select></label>
+            <label class="check"><input type="checkbox" id="set-ns" /> Supressão de ruído</label>
+            <label class="check"><input type="checkbox" id="set-ec" /> Cancelamento de eco</label>
+            <label class="check"><input type="checkbox" id="set-agc" /> Ganho automático do microfone</label>
+          </section>
+
+          <section data-panel="share" hidden>
+            <label class="field">Resolução
+              <select id="set-res">
+                <option value="720">720p (leve)</option>
+                <option value="1080">1080p</option>
+                <option value="source">Original da tela</option>
+              </select>
+            </label>
+            <label class="field">Quadros por segundo
+              <select id="set-fps">
+                <option value="15">15 fps (texto, apresentações)</option>
+                <option value="30">30 fps</option>
+                <option value="60">60 fps (jogos)</option>
+              </select>
+            </label>
+            <label class="field">Taxa máxima por pessoa
+              <select id="set-bitrate">
+                <option value="1500000">1,5 Mbps</option>
+                <option value="3000000">3 Mbps</option>
+                <option value="6000000">6 Mbps</option>
+                <option value="10000000">10 Mbps</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="set-sysaudio" /> Compartilhar áudio do sistema por padrão</label>
+            <p class="hint small">Com o áudio do sistema ligado, os amigos também ouvem o som do seu PC. Use fones para não gerar eco. As mudanças valem na próxima vez que você compartilhar.</p>
+          </section>
+
+          <section data-panel="look" hidden>
+            <label class="field">Cor de destaque
+              <span class="row">
+                <input id="set-accent" type="color" />
+                <button id="set-accent-reset" class="btn">Voltar ao padrão</button>
+              </span>
+            </label>
+          </section>
+
+          <section data-panel="server" hidden>
+            <label class="field">Servidor atual
+              <span class="row">
+                <input id="set-server" readonly />
+                <button id="set-server-copy" class="btn">Copiar</button>
+              </span>
+            </label>
+            <p id="set-server-meta" class="muted small"></p>
+            <div class="danger-zone">
+              <button id="btn-leave-server" class="btn danger-btn">Sair do servidor</button>
+              <p class="muted small" id="leave-server-hint"></p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Escolher tela ou aplicativo (app de desktop) -->
+  <div id="picker" class="modal" hidden>
+    <div class="modal-card picker-card" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+      <header class="modal-head">
+        <h3 id="picker-title">Compartilhar</h3>
+        <button class="icon-btn" id="picker-x" aria-label="Fechar">✕</button>
+      </header>
+      <div class="modal-body">
+        <nav class="tabs picker-tabs">
+          <button data-ptab="screen" class="active">Telas</button>
+          <button data-ptab="window">Aplicativos</button>
+        </nav>
+        <div id="picker-grid" class="picker-grid"></div>
+      </div>
+      <footer class="modal-foot">
+        <label class="check" id="picker-audio-wrap"><input type="checkbox" id="picker-audio" /> Compartilhar áudio do sistema</label>
+        <span class="spacer"></span>
+        <button id="picker-cancel" class="btn">Cancelar</button>
+        <button id="picker-go" class="btn primary" disabled>Compartilhar</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <div id="audio-sink" hidden></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
