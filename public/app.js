@@ -56,9 +56,12 @@
   const defaults = {
     mic: '', spk: '', cam: '', ns: true, ec: true, agc: true, vol: 100,
     res: '1080', fps: '30', bitrate: '3000000', sysaudio: false, accent: '',
+    globalKeys: false,
   };
+  const DEFAULT_KEYS = { mic: 'M', deaf: 'D', cam: 'V', screen: 'S', full: 'F', leave: '' };
   const settings = { ...defaults };
   try { Object.assign(settings, JSON.parse(store.get('liveapp.settings') || '{}')); } catch { /* usa o padrão */ }
+  settings.keys = { ...DEFAULT_KEYS, ...(settings.keys && typeof settings.keys === 'object' ? settings.keys : {}) };
   const saveSettings = () => store.set('liveapp.settings', JSON.stringify(settings));
 
   function readableOn(hex) {
@@ -167,7 +170,9 @@
       state.micTrack.enabled = state.micWanted && !state.deaf;
       localCam.addTrack(state.micTrack);
       addTrackToAll(state.micTrack, localCam);
-      watchSpeaking(selfTile, new MediaStream([state.micTrack]), () => state.micTrack && state.micTrack.enabled);
+      if (selfTile) {
+        watchSpeaking(selfTile, new MediaStream([state.micTrack]), () => state.micTrack && state.micTrack.enabled);
+      }
       return true;
     } catch {
       toast('Não consegui acessar o microfone. Verifique a permissão do navegador.');
@@ -203,11 +208,7 @@
     if (!state.channel) return;
     if (state.screenTracks.length) return stopScreen();
     try {
-      const height = settings.res === 'source' ? null : Number(settings.res);
-      const s = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: Number(settings.fps) || 30 }, ...(height ? { height: { ideal: height } } : {}) },
-        audio: Boolean(settings.sysaudio),
-      });
+      const s = await getScreenStream();
       for (const t of s.getTracks()) {
         if (t.kind === 'video') { t.contentHint = 'detail'; t.onended = stopScreen; }
         state.screenTracks.push(t);
@@ -216,7 +217,27 @@
       }
       refreshSelf();
     } catch (err) {
-      if (err && err.name !== 'NotAllowedError') toast('Não foi possível compartilhar a tela.');
+      if (err && err.name !== 'NotAllowedError') {
+        toast(`Não foi possível compartilhar a tela${err && err.name ? ` (${err.name})` : ''}.`);
+      }
+    }
+  }
+
+  // Em alguns PCs o Windows não deixa capturar o áudio do sistema (NotReadableError).
+  // Nesse caso repete só com a imagem, na mesma tela que a pessoa já escolheu.
+  async function getScreenStream() {
+    const height = settings.res === 'source' ? null : Number(settings.res);
+    const video = { frameRate: { ideal: Number(settings.fps) || 30 }, ...(height ? { height: { ideal: height } } : {}) };
+    const wantAudio = Boolean(settings.sysaudio);
+    try {
+      return await navigator.mediaDevices.getDisplayMedia({ video, audio: wantAudio });
+    } catch (err) {
+      if (!(wantAudio && err && err.name === 'NotReadableError')) throw err;
+      if (window.desktop) autoPickId = lastPickedId;
+      settings.sysaudio = false;
+      saveSettings();
+      toast('Não consegui capturar o áudio do sistema neste PC. Compartilhando só a imagem.');
+      return navigator.mediaDevices.getDisplayMedia({ video, audio: false });
     }
   }
   function stopScreen() {
@@ -286,8 +307,19 @@
     labelText.textContent = screen ? `${name} (tela)` : name;
     const flags = document.createElement('span');
     label.append(flags, labelText);
-    el.append(video, avatar, label);
+    const fsBtn = document.createElement('button');
+    fsBtn.type = 'button';
+    fsBtn.className = 'tile-fs';
+    fsBtn.title = settings.keys.full ? `Tela cheia (${prettyCombo(settings.keys.full)})` : 'Tela cheia';
+    fsBtn.setAttribute('aria-label', 'Tela cheia');
+    fsBtn.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+    fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(el); });
+    el.append(video, avatar, label, fsBtn);
     el.addEventListener('click', () => toggleFocus(el));
+    el.addEventListener('dblclick', () => toggleFullscreen(el));
     grid.append(el);
     const tile = { el, video, flags, analyser: null, stream: null };
     tile.setName = (n) => {
@@ -296,6 +328,26 @@
     };
     if (!muted) applyOutput(video);
     return tile;
+  }
+
+  // Tela cheia: no bloco clicado, ou (pelo botão/tecla F) no que está em destaque,
+  // senão na tela compartilhada, senão no primeiro bloco com vídeo.
+  function fullscreenTarget() {
+    return grid.querySelector('.tile.focused')
+      || grid.querySelector('.tile.screen')
+      || grid.querySelector('.tile.has-video:not(.self)')
+      || grid.querySelector('.tile.has-video')
+      || grid.querySelector('.tile');
+  }
+  async function toggleFullscreen(el) {
+    const target = el || fullscreenTarget();
+    if (!target) { toast('Nada para colocar em tela cheia ainda.'); return; }
+    try {
+      if (document.fullscreenElement === target) await document.exitFullscreen();
+      else await target.requestFullscreen();
+    } catch {
+      toast('Não consegui entrar em tela cheia.');
+    }
   }
 
   function toggleFocus(el) {
@@ -497,7 +549,7 @@
   async function join(channel) {
     if (state.channel === channel) return;
     if (state.channel) leave(true);
-    await ensureMicDeferred();
+    // Não espera o microfone: abrir o dispositivo pode demorar vários segundos.
     const res = await new Promise((r) => socket.emit('join', { channel }, r));
     if (res.error) { toast(res.error); return; }
     state.channel = channel;
@@ -509,6 +561,7 @@
     renderChannels(presence);
 
     selfTile = makeTile({ name: state.me.name + ' (você)', mirror: true, muted: true });
+    selfTile.el.classList.add('self');
     refreshSelf();
     if (state.micTrack) {
       watchSpeaking(selfTile, new MediaStream([state.micTrack]), () => state.micTrack && state.micTrack.enabled);
@@ -518,18 +571,14 @@
     res.history.forEach(addMessage);
     updateControls();
     emitMedia();
-  }
 
-  // O microfone precisa existir antes de criar a tela própria; o tile é criado depois.
-  async function ensureMicDeferred() {
-    if (state.micTrack) return;
-    try {
-      const s = await getMicStream();
-      state.micTrack = s.getAudioTracks()[0];
-      state.micTrack.enabled = state.micWanted && !state.deaf;
-      localCam.addTrack(state.micTrack);
-    } catch {
-      toast('Sem microfone: você poderá ouvir, mas não falar.');
+    // O microfone entra em segundo plano; quando abrir, é enviado aos outros.
+    if (!state.micTrack) {
+      ensureMic().then((ok) => {
+        if (!ok) toast('Sem microfone: você poderá ouvir, mas não falar.');
+        updateControls();
+        emitMedia();
+      });
     }
   }
 
@@ -588,17 +637,176 @@
   btn.deaf.addEventListener('click', toggleDeaf);
   btn.cam.addEventListener('click', toggleCam);
   btn.screen.addEventListener('click', toggleScreen);
+  $('#btn-full').addEventListener('click', () => toggleFullscreen());
   $('#btn-leave').addEventListener('click', () => leave(false));
 
+  // ---------- Atalhos de teclado (personalizáveis) ----------
+  const ACTIONS = [
+    { id: 'mic', label: 'Mutar / desmutar microfone', run: () => toggleMic() },
+    { id: 'deaf', label: 'Ensurdecer / voltar a ouvir', run: () => toggleDeaf() },
+    { id: 'cam', label: 'Ligar / desligar câmera', run: () => toggleCam() },
+    { id: 'screen', label: 'Compartilhar / parar a tela', run: () => toggleScreen() },
+    { id: 'full', label: 'Tela cheia', run: () => toggleFullscreen() },
+    { id: 'leave', label: 'Sair da chamada', run: () => leave(false) },
+  ];
+  const MODIFIER_KEYS = ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'OS'];
+
+  // "Ctrl+Shift+M": modificadores em ordem fixa + a tecla (letras e números pelo código físico).
+  function comboFromEvent(e) {
+    if (MODIFIER_KEYS.includes(e.key)) return null;
+    let key = e.key;
+    if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
+    else if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
+    else if (key === ' ') key = 'Space';
+    else if (key.length === 1) key = key.toUpperCase();
+    const parts = [];
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.metaKey) parts.push('Meta');
+    parts.push(key);
+    return parts.join('+');
+  }
+  const prettyCombo = (c) => (c ? c.replace(/Meta/g, 'Win').replace(/Arrow/g, '').replace(/\+/g, ' + ') : '—');
+  let recordingAction = null;
+
+  function runShortcut(id) {
+    if (!state.channel) return;
+    const a = ACTIONS.find((x) => x.id === id);
+    if (a) a.run();
+  }
+
   document.addEventListener('keydown', (e) => {
-    if (!state.channel || e.target.matches('input, textarea, select') || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (recordingAction || e.repeat) return;
     if (document.querySelector('.modal:not([hidden])')) return;
-    const k = e.key.toLowerCase();
-    if (k === 'm') toggleMic();
-    else if (k === 'd') toggleDeaf();
-    else if (k === 'v') toggleCam();
-    else if (k === 's') toggleScreen();
+    const combo = comboFromEvent(e);
+    if (!combo) return;
+    const action = Object.keys(settings.keys).find((id) => settings.keys[id] === combo);
+    if (!action) return;
+    // Teclas soltas (sem Ctrl/Alt/Win) não disparam enquanto a pessoa digita.
+    const typing = e.target.matches('input, textarea, select');
+    if (typing && !(e.ctrlKey || e.altKey || e.metaKey)) return;
+    e.preventDefault();
+    runShortcut(action);
   });
+
+  // Dicas nos botões acompanham as teclas escolhidas.
+  function updateShortcutHints() {
+    const set = (el, text, id) => { const k = settings.keys[id]; el.title = k ? `${text} (${prettyCombo(k)})` : text; };
+    set(btn.mic, 'Microfone', 'mic');
+    set(btn.deaf, 'Ensurdecer', 'deaf');
+    set(btn.cam, 'Câmera', 'cam');
+    set(btn.screen, 'Compartilhar tela', 'screen');
+    set($('#btn-full'), 'Tela cheia', 'full');
+    set($('#btn-leave'), 'Sair da chamada', 'leave');
+    document.querySelectorAll('.tile-fs').forEach((b) => {
+      b.title = settings.keys.full ? `Tela cheia (${prettyCombo(settings.keys.full)})` : 'Tela cheia';
+    });
+  }
+
+  // Atalhos globais: só no app de desktop e só com Ctrl/Alt/Win (tecla solta no sistema todo atrapalharia).
+  const hasGlobalApi = Boolean(window.desktop && window.desktop.setGlobalShortcuts);
+  async function syncGlobalShortcuts(forceOff = false) {
+    if (!hasGlobalApi) return;
+    try {
+      const res = await window.desktop.setGlobalShortcuts({
+        enabled: settings.globalKeys && !forceOff,
+        keys: settings.keys,
+      });
+      const failed = (res && res.failed) || [];
+      if (failed.length && !forceOff) {
+        const names = failed.map((id) => (ACTIONS.find((a) => a.id === id) || {}).label || id);
+        toast(`Não consegui registrar como global: ${names.join(', ')}. Outro programa pode estar usando.`);
+      }
+    } catch { /* mantém só os atalhos locais */ }
+  }
+  if (hasGlobalApi && window.desktop.onShortcut) window.desktop.onShortcut(runShortcut);
+
+  const keysList = $('#keys-list');
+  function renderKeys() {
+    keysList.textContent = '';
+    for (const a of ACTIONS) {
+      const li = document.createElement('li');
+      li.className = 'key-row';
+      const name = document.createElement('span');
+      name.className = 'key-name';
+      name.textContent = a.label;
+      const kbd = document.createElement('kbd');
+      const rec = recordingAction === a.id;
+      kbd.textContent = rec ? 'Aperte as teclas…' : prettyCombo(settings.keys[a.id]);
+      if (rec) kbd.classList.add('recording');
+      const change = document.createElement('button');
+      change.className = 'btn';
+      change.textContent = rec ? 'Cancelar' : 'Alterar';
+      change.addEventListener('click', () => (rec ? stopRecording() : startRecording(a.id)));
+      const clear = document.createElement('button');
+      clear.className = 'btn';
+      clear.textContent = 'Limpar';
+      clear.disabled = !settings.keys[a.id];
+      clear.addEventListener('click', () => { settings.keys[a.id] = ''; persistKeys(); });
+      li.append(name, kbd, change, clear);
+      keysList.append(li);
+    }
+  }
+
+  function persistKeys() {
+    saveSettings();
+    renderKeys();
+    updateShortcutHints();
+    syncGlobalShortcuts();
+  }
+
+  function startRecording(id) {
+    recordingAction = id;
+    syncGlobalShortcuts(true); // libera as combinações do sistema enquanto grava
+    renderKeys();
+  }
+  function stopRecording() {
+    recordingAction = null;
+    syncGlobalShortcuts();
+    renderKeys();
+  }
+
+  // Captura a combinação antes de qualquer outro tratador (inclusive o Esc dos modais).
+  window.addEventListener('keydown', (e) => {
+    if (!recordingAction) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.key === 'Escape') { stopRecording(); return; }
+    const combo = comboFromEvent(e);
+    if (!combo || combo === 'Tab') return; // só modificadores ainda
+    const id = recordingAction;
+    const other = Object.keys(settings.keys).find((k) => k !== id && settings.keys[k] === combo);
+    if (other) {
+      settings.keys[other] = '';
+      const otherLabel = ACTIONS.find((a) => a.id === other).label;
+      toast(`"${prettyCombo(combo)}" estava em "${otherLabel}". Passou para este atalho.`);
+    }
+    settings.keys[id] = combo;
+    recordingAction = null;
+    persistKeys();
+  }, true);
+
+  $('#keys-reset').addEventListener('click', () => {
+    settings.keys = { ...DEFAULT_KEYS };
+    recordingAction = null;
+    persistKeys();
+  });
+  const globalBox = $('#set-global');
+  $('#set-global-wrap').hidden = !hasGlobalApi;
+  globalBox.addEventListener('change', () => {
+    settings.globalKeys = globalBox.checked;
+    saveSettings();
+    syncGlobalShortcuts();
+  });
+  document.querySelector('[data-tab="keys"]').addEventListener('click', () => {
+    globalBox.checked = Boolean(settings.globalKeys);
+    renderKeys();
+  });
+  // Fechar as configurações no meio da gravação cancela a gravação.
+  new MutationObserver(() => { if ($('#settings').hidden && recordingAction) stopRecording(); })
+    .observe($('#settings'), { attributes: true, attributeFilter: ['hidden'] });
+  updateShortcutHints();
 
   // ---------- Chat ----------
   const messages = $('#messages');
@@ -683,6 +891,23 @@
   const isSecureUrl = (u) => u.startsWith('https://') || /^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(u);
   let inviteSnapshot = '';
 
+  // Endereço "de verdade" do servidor. No app de desktop, quem entra no servidor de um amigo
+  // passa por um proxy em 127.0.0.1, então location.origin não é o endereço do amigo.
+  let serverOrigin = location.origin;
+  let hosting = isLocalHost(location.hostname); // este PC é o servidor?
+  let tunnelBusy = false;
+  let appVersion = '';
+  const desktopReady = (async () => {
+    if (!window.desktop || !window.desktop.getInfo) return;
+    try {
+      const info = await window.desktop.getInfo();
+      if (!info) return;
+      hosting = info.mode === 'host';
+      appVersion = info.version || '';
+      if (info.mode === 'join' && info.serverUrl) serverOrigin = info.serverUrl;
+    } catch { /* mantém os valores do navegador */ }
+  })();
+
   async function refreshInvite() {
     if (!state.me) return;
     let info = null;
@@ -692,18 +917,20 @@
     } catch { /* offline: mantém a lista atual */ }
 
     const rows = [];
-    const origin = location.origin;
-    const local = isLocalHost(location.hostname);
-    rows.push({
-      title: local ? 'Neste computador (só funciona aqui)' : 'Endereço que você está usando',
-      url: origin,
-      tag: local ? '' : 'recomendado',
-      copy: !local,
-    });
+    const origin = serverOrigin;
+    const pub = info && info.publicUrl;
+    const originLocal = isLocalHost(new URL(origin).hostname);
+    if (pub) rows.push({ title: 'Link público (funciona de qualquer lugar)', url: pub, tag: 'recomendado', copy: true });
+    if (!originLocal && origin !== pub) {
+      rows.push({ title: 'Servidor que você está usando', url: origin, tag: pub ? '' : 'recomendado', copy: true });
+    }
+    if (originLocal) rows.push({ title: 'Neste computador (só funciona aqui)', url: origin, tag: '', copy: false });
     for (const a of (info && info.addresses) || []) {
       if (a.url === origin) continue;
       rows.push({ title: `${a.label} · ${a.iface}`, url: a.url, tag: '', copy: true });
     }
+
+    renderTunnelAction(Boolean(pub));
 
     const snapshot = JSON.stringify(rows) + (info ? info.online : '');
     if (snapshot !== inviteSnapshot) {
@@ -740,14 +967,45 @@
 
     const hasPlain = rows.some((r) => r.copy && !isSecureUrl(r.url));
     const hints = [];
-    if (info && !info.addresses.length) hints.push('Nenhuma rede encontrada. Conecte-se ao Wi-Fi, cabo ou a uma VPN.');
-    if (hasPlain) {
-      hints.push(
-        'Endereços http:// funcionam no app LiveApp. No navegador, microfone e câmera exigem HTTPS: ' +
-        'para amigos de fora, rode "cloudflared tunnel --url http://localhost:' + (info ? info.port : 3000) + '" e mande o link https.'
-      );
+    if (pub && !brand.requiresCode) {
+      hints.push('Quem tiver o link público entra. Defina "accessCode" no brand.config.json para exigir um código.');
     }
+    if (!pub && hosting && window.desktop && window.desktop.startTunnel) {
+      hints.push('Amigos fora da sua casa precisam do link público (ou de uma VPN); o IP da rede local só funciona na mesma casa.');
+    } else if (hasPlain && !window.desktop) {
+      hints.push('No navegador, microfone e câmera só funcionam em HTTPS (use o link público) ou no app LiveApp.');
+    }
+    if (info && !info.addresses.length && !pub) hints.push('Nenhuma rede encontrada. Conecte-se ao Wi-Fi, cabo ou a uma VPN.');
     $('#invite-hint').textContent = hints.join(' ');
+  }
+
+  // Botão "Gerar link público" (só no app de quem hospeda).
+  function renderTunnelAction(active) {
+    const box = $('#invite-actions');
+    box.textContent = '';
+    if (!(hosting && window.desktop && window.desktop.startTunnel)) return;
+    const b = document.createElement('button');
+    b.className = 'btn ' + (active ? '' : 'primary');
+    b.disabled = tunnelBusy;
+    if (tunnelBusy) b.textContent = 'Criando link…';
+    else b.textContent = active ? 'Desativar link público' : '🌐 Gerar link público (internet)';
+    b.addEventListener('click', async () => {
+      if (tunnelBusy) return;
+      tunnelBusy = true;
+      renderTunnelAction(active);
+      if (active) {
+        await window.desktop.stopTunnel();
+        toast('Link público desativado.');
+      } else {
+        const res = await window.desktop.startTunnel();
+        if (res && res.error) toast(res.error);
+        else toast('Link público criado!');
+      }
+      tunnelBusy = false;
+      inviteSnapshot = '';
+      refreshInvite();
+    });
+    box.append(b);
   }
 
   function openInvite() {
@@ -763,7 +1021,7 @@
 
   // No app de desktop de quem hospeda, mostra o convite uma vez após o primeiro login.
   function maybeAutoInvite() {
-    if (!window.desktop || !isLocalHost(location.hostname) || store.get('liveapp.inviteShown')) return;
+    if (!window.desktop || !hosting || store.get('liveapp.inviteShown')) return;
     store.set('liveapp.inviteShown', '1');
     setTimeout(openInvite, 400);
   }
@@ -804,8 +1062,8 @@
     for (const k of ['ns', 'ec', 'agc', 'sysaudio']) setEl[k].checked = Boolean(settings[k]);
     for (const k of ['res', 'fps', 'bitrate']) setEl[k].value = String(settings[k]);
     setEl.accent.value = settings.accent || (getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#5865f2');
-    $('#set-server').value = location.origin;
-    const host = window.desktop && isLocalHost(location.hostname);
+    $('#set-server').value = serverOrigin;
+    const host = window.desktop && hosting;
     $('#leave-server-hint').textContent = window.desktop
       ? (host ? 'Você hospeda este servidor: sair o desliga para todos e volta para a tela de escolha.'
               : 'Volta para a tela de escolha de servidor do app.')
@@ -818,7 +1076,7 @@
       const r = await fetch(`/server-info?id=${encodeURIComponent(state.me.id)}`);
       if (r.ok) {
         const info = await r.json();
-        $('#set-server-meta').textContent = `${info.name} · ${info.online} ${info.online === 1 ? 'pessoa conectada' : 'pessoas conectadas'}`;
+        $('#set-server-meta').textContent = `${info.name}${appVersion ? ' v' + appVersion : ''} · ${info.online} ${info.online === 1 ? 'pessoa conectada' : 'pessoas conectadas'}`;
       }
     } catch { /* ignora */ }
   }
@@ -899,10 +1157,9 @@
     });
   });
 
-  $('#set-server-copy').addEventListener('click', () => copyText(location.origin));
+  $('#set-server-copy').addEventListener('click', () => copyText(serverOrigin));
   $('#btn-leave-server').addEventListener('click', () => {
-    const hosting = window.desktop && isLocalHost(location.hostname);
-    const ask = hosting
+    const ask = window.desktop && hosting
       ? 'Você está hospedando este servidor. Sair vai desligá-lo para todos. Continuar?'
       : 'Sair deste servidor?';
     if (!confirm(ask)) return;
@@ -916,6 +1173,9 @@
   let pickerReq = null;
   let pickerTab = 'screen';
   let pickerSel = null;
+  // Usado quando o compartilhamento precisa ser repetido sem áudio (ver getScreenStream).
+  let lastPickedId = null;
+  let autoPickId = null;
 
   function renderPicker() {
     const grid = $('#picker-grid');
@@ -959,6 +1219,11 @@
   }
 
   function showPicker(req) {
+    if (autoPickId) {
+      const again = req.sources.find((s) => s.id === autoPickId);
+      autoPickId = null;
+      if (again) { window.desktop.pickSource(req.reqId, again.id, false); return; }
+    }
     if (pickerReq) window.desktop.cancelPick(pickerReq.reqId);
     pickerReq = req;
     pickerSel = null;
@@ -971,6 +1236,7 @@
   }
   function confirmPicker() {
     if (!pickerReq || !pickerSel) return;
+    lastPickedId = pickerSel;
     window.desktop.pickSource(pickerReq.reqId, pickerSel, $('#picker-audio').checked);
     pickerReq = null;
     closeModal($('#picker'));
@@ -991,6 +1257,8 @@
   $('#picker-cancel').addEventListener('click', cancelPicker);
   $('#picker-x').addEventListener('click', cancelPicker);
   if (window.desktop && window.desktop.onPickSources) window.desktop.onPickSources(showPicker);
+
+  desktopReady.then(() => syncGlobalShortcuts());
 
   // ---------- Reconexão ----------
   let wasConnected = false;
