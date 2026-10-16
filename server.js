@@ -45,6 +45,7 @@ function createApp(port) {
   const server = http.createServer(app);
   const io = new Server(server);
   let publicUrl = null;
+  let iceOverride = null; // lista STUN/TURN definida por quem hospeda (sobrepõe a do brand.config.json)
 
   const history = Object.fromEntries(brand.channels.map((c) => [c, []]));
   // socket.id -> { name, channel, media: { mic, cam, screen } }
@@ -55,7 +56,7 @@ function createApp(port) {
   // Configuração pública para o cliente (sem o código de acesso).
   app.get('/brand.json', (_req, res) => {
     const { accessCode, ...pub } = brand;
-    res.json({ ...pub, requiresCode: Boolean(accessCode) });
+    res.json({ ...pub, iceServers: iceOverride || brand.iceServers, requiresCode: Boolean(accessCode) });
   });
 
   // Só quem já entrou (tem sessão) vê os endereços da máquina.
@@ -142,6 +143,34 @@ function createApp(port) {
       if (u.channel) socket.to(u.channel).emit('peer-media', { id: socket.id, media: u.media });
     });
 
+    // Plano B quando o P2P não abre: a mídia (pedaços de WebM gravados no navegador de quem envia)
+    // passa pelo servidor, que só repassa a quem pediu. Vai pelo mesmo WebSocket do chat.
+    const sameChannel = (toId) => {
+      const from = users.get(socket.id);
+      const target = users.get(toId);
+      return Boolean(from && target && from.channel && from.channel === target.channel);
+    };
+    const targets = (list) => (Array.isArray(list) ? list : []).slice(0, 16).filter((id) => typeof id === 'string' && sameChannel(id));
+
+    // Quem não recebe pede ao remetente para repassar pelo servidor.
+    socket.on('rl-want', ({ to }) => {
+      if (typeof to === 'string' && sameChannel(to)) io.to(to).emit('rl-want', { from: socket.id });
+    });
+    socket.on('rl-begin', ({ to, kind, epoch, mime, hasVideo }) => {
+      if (kind !== 'cam' && kind !== 'screen') return;
+      const msg = { from: socket.id, kind, epoch: Number(epoch) || 0, mime: String(mime || '').slice(0, 120), hasVideo: Boolean(hasVideo) };
+      for (const id of targets(to)) io.to(id).emit('rl-begin', msg);
+    });
+    socket.on('rl-chunk', ({ to, kind, epoch, buf }) => {
+      if ((kind !== 'cam' && kind !== 'screen') || !Buffer.isBuffer(buf) || buf.length > 4 * 1024 * 1024) return;
+      const msg = { from: socket.id, kind, epoch: Number(epoch) || 0, buf };
+      for (const id of targets(to)) io.to(id).emit('rl-chunk', msg);
+    });
+    socket.on('rl-end', ({ to, kind }) => {
+      if (kind !== 'cam' && kind !== 'screen') return;
+      for (const id of targets(to)) io.to(id).emit('rl-end', { from: socket.id, kind });
+    });
+
     // Repasse de sinalização somente entre pessoas do mesmo canal.
     socket.on('signal', ({ to, data }) => {
       const from = users.get(socket.id);
@@ -175,6 +204,7 @@ function createApp(port) {
       });
     },
     setPublicUrl(url) { publicUrl = url || null; },
+    setIceServers(list) { iceOverride = Array.isArray(list) && list.length ? list : null; },
   };
 }
 

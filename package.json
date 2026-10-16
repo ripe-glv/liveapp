@@ -1,6 +1,6 @@
 {
   "name": "liveapp",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "private": true,
   "description": "App white label de chat, voz, câmera e compartilhamento de tela (web + desktop).",
   "author": "LiveApp",

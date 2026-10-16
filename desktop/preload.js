@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('desktop', {
   startTunnel: () => ipcRenderer.invoke('tunnel:start'),
   stopTunnel: () => ipcRenderer.invoke('tunnel:stop'),
   leaveServer: () => ipcRenderer.invoke('app:leave-server'),
+  getTurn: () => ipcRenderer.invoke('turn:get'),
+  setTurn: (turn) => ipcRenderer.invoke('turn:set', turn),
   setGlobalShortcuts: (opts) => ipcRenderer.invoke('shortcuts:set', opts),
   onShortcut: (cb) => ipcRenderer.on('shortcut:action', (_e, id) => cb(id)),
   onPickSources: (cb) => ipcRenderer.on('picker:sources', (_e, payload) => cb(payload)),

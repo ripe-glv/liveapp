@@ -92,6 +92,7 @@
           <button data-tab="share">Tela</button>
           <button data-tab="keys">Atalhos</button>
           <button data-tab="look">Aparência</button>
+          <button data-tab="net">Rede</button>
           <button data-tab="server">Servidor</button>
         </nav>
 
@@ -159,6 +160,31 @@
                 <button id="set-accent-reset" class="btn">Voltar ao padrão</button>
               </span>
             </label>
+          </section>
+
+          <section data-panel="net" hidden>
+            <p class="muted small">Estado de cada conexão de áudio/vídeo. Se aparecer <b>FALHOU</b> ou <b>0 quadros de vídeo</b>, a rede de vocês não deixa o P2P passar e é preciso um servidor TURN.</p>
+            <div id="net-peers" class="net-peers"></div>
+            <div class="row-actions">
+              <button id="net-refresh" class="btn">Atualizar</button>
+            </div>
+            <label class="check"><input type="checkbox" id="set-relay" /> Forçar relay (usar só o servidor TURN)</label>
+
+            <div id="turn-form" hidden>
+              <h4 class="sub">Servidor TURN (para todos que entram)</h4>
+              <p class="muted small">Crie uma conta gratuita em um provedor TURN (ex.: metered.ca) e cole aqui os dados que ele mostra.</p>
+              <label class="field">Endereços (um por linha)
+                <textarea id="turn-urls" rows="4" spellcheck="false" placeholder="turn:global.relay.metered.ca:80&#10;turn:global.relay.metered.ca:443?transport=tcp&#10;turns:global.relay.metered.ca:443?transport=tcp"></textarea>
+              </label>
+              <label class="field">Usuário <input id="turn-user" autocomplete="off" spellcheck="false" /></label>
+              <label class="field">Senha <input id="turn-pass" type="password" autocomplete="off" /></label>
+              <div class="row-actions">
+                <button id="turn-test" class="btn">Testar</button>
+                <button id="turn-save" class="btn primary">Salvar para todos</button>
+              </div>
+              <p id="turn-result" class="hint small"></p>
+            </div>
+            <p id="turn-guest-note" class="hint small" hidden>O servidor TURN é configurado por quem hospeda (Configurações → Rede no app dele).</p>
           </section>
 
           <section data-panel="server" hidden>

@@ -56,7 +56,7 @@
   const defaults = {
     mic: '', spk: '', cam: '', ns: true, ec: true, agc: true, vol: 100,
     res: '1080', fps: '30', bitrate: '3000000', sysaudio: false, accent: '',
-    globalKeys: false,
+    globalKeys: false, relay: false,
   };
   const DEFAULT_KEYS = { mic: 'M', deaf: 'D', cam: 'V', screen: 'S', full: 'F', leave: '' };
   const settings = { ...defaults };
@@ -254,11 +254,16 @@
 
   function addTrackToAll(track, stream) {
     for (const peer of state.peers.values()) addTrackToPeer(peer, track, stream);
+    relayRefresh();
   }
   function addTrackToPeer(peer, track, stream) {
     if (peer.senders.has(track)) return;
     const sender = peer.pc.addTrack(track, stream);
     peer.senders.set(track, sender);
+    if (track.kind === 'video') {
+      const tr = peer.pc.getTransceivers().find((t) => t.sender === sender);
+      if (tr) preferVp8(tr);
+    }
     if (stream === localScreen && track.kind === 'video') {
       try {
         const p = sender.getParameters();
@@ -268,6 +273,24 @@
       } catch { /* aplicado na renegociação */ }
     }
   }
+  // VP8 primeiro: decodifica em software em qualquer PC. O H.264 por hardware é a causa mais
+  // comum de vídeo verde/travado em alguns drivers de vídeo.
+  function preferVp8(transceiver) {
+    try {
+      const caps = RTCRtpSender.getCapabilities('video');
+      if (!caps || typeof transceiver.setCodecPreferences !== 'function') return;
+      const rank = (c) => {
+        const m = c.mimeType.toLowerCase();
+        if (m.endsWith('/vp8')) return 0;
+        if (m.endsWith('/vp9')) return 1;
+        if (m.endsWith('/av1')) return 2;
+        if (m.endsWith('/h264')) return 3;
+        return 4; // rtx, red, ulpfec: precisam continuar na lista
+      };
+      transceiver.setCodecPreferences([...caps.codecs].sort((a, b) => rank(a) - rank(b)));
+    } catch { /* o navegador escolhe sozinho */ }
+  }
+
   function removeTrackFromAll(track) {
     for (const peer of state.peers.values()) {
       const sender = peer.senders.get(track);
@@ -275,6 +298,7 @@
       peer.senders.delete(track);
       try { peer.pc.removeTrack(sender); } catch { /* conexão já fechada */ }
     }
+    relayRefresh();
   }
 
   function emitMedia() {
@@ -317,11 +341,20 @@
       'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
       '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
     fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(el); });
-    el.append(video, avatar, label, fsBtn);
+    const conn = document.createElement('div');
+    conn.className = 'conn';
+    conn.hidden = true;
+    el.append(video, avatar, label, fsBtn, conn);
     el.addEventListener('click', () => toggleFocus(el));
     el.addEventListener('dblclick', () => toggleFullscreen(el));
     grid.append(el);
     const tile = { el, video, flags, analyser: null, stream: null };
+    // Texto de estado da conexão sobre o bloco (some quando está tudo certo).
+    tile.setConn = (text, bad = false) => {
+      conn.textContent = text || '';
+      conn.hidden = !text;
+      conn.classList.toggle('bad', Boolean(bad));
+    };
     tile.setName = (n) => {
       labelText.textContent = screen ? `${n} (tela)` : n;
       avatar.textContent = initial(n);
@@ -438,7 +471,10 @@
 
   function createPeer({ id, name, media }) {
     if (state.peers.has(id)) return state.peers.get(id);
-    const pc = new RTCPeerConnection({ iceServers: brand.iceServers });
+    const pc = new RTCPeerConnection({
+      iceServers: brand.iceServers,
+      iceTransportPolicy: settings.relay ? 'relay' : 'all',
+    });
     const peer = {
       id, name, media, pc, meta: null, senders: new Map(),
       polite: state.me.id < id, makingOffer: false, ignoreOffer: false,
@@ -464,14 +500,34 @@
       const stream = streams[0] || new MediaStream([track]);
       attachRemote(peer, stream);
     };
+    peer.tile.setConn('conectando…');
+    let disconnectTimer = null;
+    let warned = false;
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') pc.restartIce();
+      const s = pc.connectionState;
+      clearTimeout(disconnectTimer);
+      if (s === 'connected') {
+        peer.tile.setConn('');
+      } else if (s === 'failed') {
+        peer.tile.setConn('sem conexão', true);
+        pc.restartIce();
+        if (!warned) {
+          warned = true;
+          toast(`Sem conexão com ${peer.name}. Em redes restritivas é preciso um servidor TURN (Configurações → Rede).`);
+        }
+      } else if (s === 'disconnected') {
+        peer.tile.setConn('instável…', true);
+        disconnectTimer = setTimeout(() => { if (pc.connectionState !== 'connected') pc.restartIce(); }, 4000);
+      } else if (s === 'new' || s === 'connecting') {
+        peer.tile.setConn('conectando…');
+      }
     };
 
     // Diz ao outro lado qual stream é câmera e qual é tela (a ordem do socket é garantida).
     sendSignal(id, { meta: { cam: localCam.id, screen: localScreen.id } });
     localCam.getTracks().forEach((t) => addTrackToPeer(peer, t, localCam));
     localScreen.getTracks().forEach((t) => addTrackToPeer(peer, t, localScreen));
+    startRelayWatch(peer);
     return peer;
   }
 
@@ -494,6 +550,7 @@
   function closePeer(id) {
     const peer = state.peers.get(id);
     if (!peer) return;
+    relayDropPeer(id);
     peer.pc.close();
     removeTile(peer.tile);
     removeTile(peer.screenTile);
@@ -545,10 +602,232 @@
     setFlags(peer.tile, media);
   });
 
+  // ---------- Plano B: mídia pelo servidor (quando o P2P não abre) ----------
+  // Quem não recebe nada por P2P pede ('rl-want'); o remetente passa a gravar câmera/tela em WebM
+  // e envia os pedaços pelo WebSocket. Quem recebe toca com MediaSource. Atraso de ~1 a 2 s,
+  // mas atravessa qualquer NAT, inclusive CGNAT, e não precisa de servidor TURN.
+  const relayOut = { want: new Set(), rec: { cam: null, screen: null }, epoch: 0, timer: null };
+  const relayIn = new Map(); // "idDoRemetente|tipo" -> reprodução em andamento
+  const rlDebug = (window.__rl = { log: [], sent: 0, got: 0 });
+  const rlLog = (msg) => { rlDebug.log.push(`${Math.round(performance.now() / 1000)}s ${msg}`); if (rlDebug.log.length > 60) rlDebug.log.shift(); };
+
+  function relayRefresh() {
+    clearTimeout(relayOut.timer);
+    relayOut.timer = setTimeout(relayApply, 300);
+  }
+
+  function relayStopRecorder(kind, notify) {
+    const rec = relayOut.rec[kind];
+    relayOut.rec[kind] = null;
+    if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch { /* já parou */ } }
+    if (notify && relayOut.want.size) socket.emit('rl-end', { to: [...relayOut.want], kind });
+  }
+
+  function relayStopAll() {
+    clearTimeout(relayOut.timer);
+    relayStopRecorder('cam', false);
+    relayStopRecorder('screen', false);
+    relayOut.want.clear();
+  }
+
+  // (Re)inicia a gravação de cada fonte. Mudar as faixas no meio exige reiniciar o gravador,
+  // e quem entra depois precisa do cabeçalho do início, então todos recomeçam juntos.
+  function relayApply() {
+    for (const kind of ['cam', 'screen']) {
+      const stream = kind === 'cam' ? localCam : localScreen;
+      const tracks = stream.getTracks().filter((t) => t.readyState === 'live');
+      relayStopRecorder(kind, !tracks.length);
+      if (!relayOut.want.size || !state.channel || !tracks.length) continue;
+      const hasVideo = tracks.some((t) => t.kind === 'video');
+      const hasAudio = tracks.some((t) => t.kind === 'audio');
+      const mime = hasVideo ? (hasAudio ? 'video/webm;codecs=vp8,opus' : 'video/webm;codecs=vp8') : 'audio/webm;codecs=opus';
+      if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported(mime)) continue;
+      let rec;
+      try {
+        rec = new MediaRecorder(new MediaStream(tracks), {
+          mimeType: mime,
+          videoBitsPerSecond: kind === 'screen' ? Math.min(Number(settings.bitrate) || 2_500_000, 2_500_000) : 1_000_000,
+          audioBitsPerSecond: 64_000,
+        });
+      } catch { continue; }
+      const epoch = ++relayOut.epoch;
+      relayOut.rec[kind] = rec;
+      socket.emit('rl-begin', { to: [...relayOut.want], kind, epoch, mime, hasVideo });
+      rlLog(`envio begin ${kind} #${epoch} ${mime}`);
+      rec.ondataavailable = async (e) => {
+        if (!e.data || !e.data.size || relayOut.rec[kind] !== rec || !relayOut.want.size) return;
+        rlDebug.sent += e.data.size;
+        socket.emit('rl-chunk', { to: [...relayOut.want], kind, epoch, buf: await e.data.arrayBuffer() });
+      };
+      rec.start(300);
+    }
+  }
+
+  socket.on('rl-want', ({ from }) => {
+    if (!state.peers.has(from)) return;
+    const known = relayOut.want.has(from);
+    relayOut.want.add(from);
+    const now = Date.now();
+    if (known && now - (relayOut.lastApply || 0) < 2000) return;
+    relayOut.lastApply = now;
+    relayApply(); // recomeça para que o novo ouvinte (ou quem travou) receba o cabeçalho
+  });
+
+  function ensureScreenTile(peer) {
+    if (!peer.screenTile) {
+      const tile = makeTile({ name: peer.name, screen: true });
+      tile.isScreen = true;
+      tile.peerId = peer.id;
+      peer.screenTile = tile;
+      toggleFocus(tile.el);
+    }
+    return peer.screenTile;
+  }
+
+  function relayPump(entry) {
+    const { sb, tile } = entry;
+    if (!sb || sb.updating || !entry.queue.length || entry.ms.readyState !== 'open') return;
+    const vid = tile.video;
+    try {
+      const b = sb.buffered;
+      if (b.length && vid.currentTime - b.start(0) > 20) { // não deixa a memória crescer
+        sb.remove(b.start(0), vid.currentTime - 5);
+        return;
+      }
+      sb.appendBuffer(entry.queue.shift());
+      entry.lastAppend = Date.now();
+    } catch (err) {
+      if (err && err.name === 'QuotaExceededError') {
+        try { const b = sb.buffered; if (b.length) sb.remove(b.start(0), Math.max(b.start(0), vid.currentTime - 2)); } catch { /* ignora */ }
+      } else {
+        rlLog(`erro append: ${err && err.name} ${err && err.message}`);
+        entry.queue.length = 0;
+        socket.emit('rl-want', { to: entry.peer.id }); // pede um começo limpo
+      }
+    }
+  }
+
+  function relayTeardown(key) {
+    const e = relayIn.get(key);
+    if (!e) return;
+    relayIn.delete(key);
+    try { e.tile.video.removeAttribute('src'); e.tile.video.load(); } catch { /* ignora */ }
+    try { URL.revokeObjectURL(e.url); } catch { /* ignora */ }
+  }
+
+  socket.on('rl-begin', ({ from, kind, epoch, mime, hasVideo }) => {
+    const peer = state.peers.get(from);
+    rlLog(`recebi begin ${kind} #${epoch} peer=${!!peer} mse=${!!window.MediaSource && MediaSource.isTypeSupported(mime)}`);
+    if (!peer || !window.MediaSource || !MediaSource.isTypeSupported(mime)) return;
+    const key = `${from}|${kind}`;
+    relayTeardown(key);
+    const tile = kind === 'screen' ? ensureScreenTile(peer) : peer.tile;
+    const ms = new MediaSource();
+    const entry = { ms, sb: null, queue: [], epoch, url: URL.createObjectURL(ms), tile, peer, kind, lastAppend: Date.now() };
+    relayIn.set(key, entry);
+    tile.video.srcObject = null;
+    tile.video.src = entry.url;
+    tile.video.muted = tile.video.muted || state.deaf;
+    tile.el.classList.toggle('has-video', Boolean(hasVideo));
+    peer.tile.setConn('via servidor');
+    ms.addEventListener('sourceopen', () => {
+      try {
+        entry.sb = ms.addSourceBuffer(mime);
+        entry.sb.mode = 'sequence';
+        entry.sb.addEventListener('updateend', () => {
+          const b = entry.sb.buffered;
+          if (b.length) { // fica perto do "ao vivo"
+            const end = b.end(b.length - 1);
+            if (end - tile.video.currentTime > 1.5) tile.video.currentTime = end - 0.4;
+          }
+          relayPump(entry);
+        });
+        relayPump(entry);
+      } catch (err) { rlLog(`erro addSourceBuffer: ${err && err.name}`); }
+    }, { once: true });
+    tile.video.play().catch(() => {});
+  });
+
+  socket.on('rl-chunk', ({ from, kind, epoch, buf }) => {
+    const entry = relayIn.get(`${from}|${kind}`);
+    rlDebug.got += (buf.byteLength || buf.length || 0);
+    if (!entry || entry.epoch !== epoch) return;
+    entry.peer.relayBytes = (entry.peer.relayBytes || 0) + (buf.byteLength || buf.length || 0);
+    entry.queue.push(buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf);
+    if (entry.queue.length > 300) { // ficou para trás demais: recomeça do ao vivo
+      entry.queue.length = 0;
+      socket.emit('rl-want', { to: from });
+      return;
+    }
+    relayPump(entry);
+  });
+
+  socket.on('rl-end', ({ from, kind }) => {
+    const peer = state.peers.get(from);
+    relayTeardown(`${from}|${kind}`);
+    if (!peer) return;
+    if (kind === 'screen' && peer.screenTile) { removeTile(peer.screenTile); peer.screenTile = null; }
+    if (kind === 'cam') peer.tile.el.classList.remove('has-video');
+  });
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const entry of relayIn.values()) {
+      if (entry.queue.length && now - entry.lastAppend > 4000) {
+        entry.lastAppend = now;
+        entry.queue.length = 0;
+        rlLog(`vigia: sem progresso em ${entry.kind}, pedindo recomeço`);
+        socket.emit('rl-want', { to: entry.peer.id });
+      }
+    }
+  }, 3000);
+
+  function relayDropPeer(id) {
+    relayOut.want.delete(id);
+    relayTeardown(`${id}|cam`);
+    relayTeardown(`${id}|screen`);
+    const peer = state.peers.get(id);
+    if (peer && peer.relayTimer) { clearInterval(peer.relayTimer); peer.relayTimer = null; }
+    if (relayOut.want.size === 0) { relayStopRecorder('cam', false); relayStopRecorder('screen', false); }
+  }
+
+  // Decide sozinho quando o P2P não está funcionando e pede o plano B.
+  function startRelayWatch(peer) {
+    peer.createdAt = Date.now();
+    let strikes = 0;
+    peer.relayTimer = setInterval(async () => {
+      if (!state.peers.has(peer.id)) { clearInterval(peer.relayTimer); return; }
+      if (peer.relayRequested || Date.now() - peer.createdAt < 8000) return;
+      const st = peer.pc.connectionState;
+      const wantsMedia = Boolean(peer.media && (peer.media.mic || peer.media.cam || peer.media.screen));
+      let bytes = 0;
+      try { (await peer.pc.getStats()).forEach((s) => { if (s.type === 'inbound-rtp') bytes += s.bytesReceived || 0; }); } catch { /* ignora */ }
+      const broken = st === 'failed' || ((st !== 'connected' || bytes === 0) && wantsMedia);
+      strikes = broken ? strikes + 1 : 0;
+      if (strikes >= 2) { // duas verificações seguidas (≈4 s) para não confundir com o início
+        peer.relayRequested = true;
+        peer.tile.setConn('via servidor…');
+        socket.emit('rl-want', { to: peer.id });
+      }
+    }, 2000);
+  }
+
+  // Lista STUN/TURN atual do servidor (muda quando o anfitrião configura um TURN).
+  async function loadIce() {
+    try {
+      const r = await fetch('/brand.json', { cache: 'no-store' });
+      if (r.ok) {
+        const fresh = await r.json();
+        if (Array.isArray(fresh.iceServers) && fresh.iceServers.length) brand.iceServers = fresh.iceServers;
+      }
+    } catch { /* usa a lista que já temos */ }
+  }
+
   // ---------- Entrar / sair ----------
   async function join(channel) {
     if (state.channel === channel) return;
     if (state.channel) leave(true);
+    await loadIce(); // quem hospeda pode ter configurado um TURN depois que a página abriu
     // Não espera o microfone: abrir o dispositivo pode demorar vários segundos.
     const res = await new Promise((r) => socket.emit('join', { channel }, r));
     if (res.error) { toast(res.error); return; }
@@ -586,6 +865,7 @@
     stopCam();
     stopScreen();
     for (const id of [...state.peers.keys()]) closePeer(id);
+    relayStopAll();
     if (selfTile) { removeTile(selfTile.screen); removeTile(selfTile); selfTile = null; }
     grid.classList.remove('has-focus');
     socket.emit('leave');
@@ -1102,6 +1382,7 @@
     }
     old.stop();
     state.micTrack = next;
+    relayRefresh();
     if (selfTile) {
       speakers.delete(selfTile);
       selfTile.analyser = null;
@@ -1167,6 +1448,147 @@
     if (window.desktop && window.desktop.leaveServer) { window.desktop.leaveServer(); return; }
     socket.disconnect();
     location.reload();
+  });
+
+  // ---------- Rede: diagnóstico e servidor TURN ----------
+  const STATE_PT = {
+    connected: 'conectado', connecting: 'conectando', new: 'aguardando', failed: 'FALHOU',
+    disconnected: 'instável', closed: 'fechado',
+  };
+
+  async function describePeer(peer) {
+    const pc = peer.pc;
+    let route = 'sem caminho';
+    let recv = 0;
+    const viaServer = Boolean(peer.relayBytes);
+    let frames = 0;
+    let lost = 0;
+    try {
+      const stats = await pc.getStats();
+      const byId = {};
+      stats.forEach((s) => { byId[s.id] = s; });
+      let pair = null;
+      stats.forEach((s) => { if (s.type === 'transport' && s.selectedCandidatePairId) pair = byId[s.selectedCandidatePairId]; });
+      if (!pair) stats.forEach((s) => { if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s; });
+      if (pair) {
+        const l = byId[pair.localCandidateId];
+        const r = byId[pair.remoteCandidateId];
+        const kind = (c) => (!c ? '?' : c.candidateType === 'relay' ? 'relay'
+          : (c.candidateType === 'srflx' || c.candidateType === 'prflx') ? 'internet' : 'rede local');
+        route = (l && l.candidateType === 'relay') || (r && r.candidateType === 'relay')
+          ? 'via relay (TURN)' : `direto (${kind(l)} ↔ ${kind(r)})`;
+      }
+      stats.forEach((s) => {
+        if (s.type !== 'inbound-rtp') return;
+        recv += s.bytesReceived || 0;
+        lost += s.packetsLost || 0;
+        if (s.kind === 'video') frames += s.framesDecoded || 0;
+      });
+    } catch { /* sem estatísticas ainda */ }
+    if (viaServer) { // o P2P não abriu e a mídia chega pelo servidor do app
+      route = 'via servidor do app (sem P2P)';
+      recv += peer.relayBytes;
+    }
+    return {
+      name: peer.name, state: viaServer ? 'conectado (servidor)' : (STATE_PT[pc.connectionState] || pc.connectionState),
+      route, recvKB: Math.round(recv / 1024), frames, lost, bad: pc.connectionState === 'failed' && !viaServer,
+    };
+  }
+
+  async function renderNet() {
+    const box = $('#net-peers');
+    if (!state.channel || !state.peers.size) {
+      box.textContent = state.channel ? 'Ninguém mais no canal.' : 'Entre em um canal para ver as conexões.';
+      return;
+    }
+    const rows = await Promise.all([...state.peers.values()].map(describePeer));
+    box.textContent = '';
+    for (const r of rows) {
+      const li = document.createElement('div');
+      li.className = 'net-row' + (r.bad ? ' bad' : '');
+      li.textContent = `${r.name} · ${r.state} · ${r.route} · ${r.recvKB} KB recebidos · ${r.frames} quadros de vídeo` +
+        (r.lost ? ` · ${r.lost} pacotes perdidos` : '');
+      box.append(li);
+    }
+  }
+
+  let netTimer = null;
+  function startNetPolling() {
+    clearInterval(netTimer);
+    renderNet();
+    netTimer = setInterval(() => {
+      const panel = document.querySelector('[data-panel="net"]');
+      if ($('#settings').hidden || !panel || panel.hidden) { clearInterval(netTimer); netTimer = null; return; }
+      renderNet();
+    }, 2000);
+  }
+
+  // Pede um candidato "relay" ao servidor TURN: prova que endereço, usuário e senha funcionam.
+  async function testTurn(urls, username, credential) {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls, username, credential }], iceTransportPolicy: 'relay' });
+    pc.createDataChannel('t');
+    const res = { relay: false, codes: [] };
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.type === 'relay') res.relay = true; };
+    pc.onicecandidateerror = (e) => res.codes.push(e.errorCode);
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((resolve) => {
+      const giveUp = setTimeout(resolve, 10000);
+      const poll = setInterval(() => {
+        if (res.relay || pc.iceGatheringState === 'complete') { clearTimeout(giveUp); clearInterval(poll); resolve(); }
+      }, 200);
+    });
+    pc.close();
+    return res;
+  }
+
+  const turnEls = { urls: $('#turn-urls'), user: $('#turn-user'), pass: $('#turn-pass'), result: $('#turn-result') };
+  const readTurnForm = () => ({
+    urls: turnEls.urls.value.split(/[\s,]+/).map((u) => u.trim()).filter(Boolean),
+    username: turnEls.user.value.trim(),
+    credential: turnEls.pass.value,
+  });
+
+  $('#set-relay').addEventListener('change', () => {
+    settings.relay = $('#set-relay').checked;
+    saveSettings();
+    toast('Vale na próxima vez que você entrar em um canal.');
+  });
+  $('#net-refresh').addEventListener('click', renderNet);
+  $('#turn-test').addEventListener('click', async () => {
+    const t = readTurnForm();
+    if (!t.urls.length) { turnEls.result.textContent = 'Informe pelo menos um endereço turn:'; return; }
+    turnEls.result.textContent = 'Testando… (até 10 s)';
+    try {
+      const r = await testTurn(t.urls, t.username, t.credential);
+      if (r.relay) turnEls.result.textContent = '✓ Funcionando: o servidor entregou um caminho de relay.';
+      else if (r.codes.some((c) => c === 401 || c === 403)) turnEls.result.textContent = '✗ O servidor respondeu, mas recusou o usuário/senha.';
+      else turnEls.result.textContent = '✗ Não deu certo: confira endereço, usuário e senha (ou a sua rede bloqueia a porta).';
+    } catch { turnEls.result.textContent = '✗ Não consegui testar.'; }
+  });
+  $('#turn-save').addEventListener('click', async () => {
+    const t = readTurnForm();
+    const res = await window.desktop.setTurn(t.urls.length ? t : null);
+    turnEls.result.textContent = res && res.error ? res.error
+      : t.urls.length ? 'Salvo para todos. Quem já está numa chamada precisa sair do canal e entrar de novo.'
+        : 'Removido.';
+  });
+
+  document.querySelector('[data-tab="net"]').addEventListener('click', async () => {
+    $('#set-relay').checked = Boolean(settings.relay);
+    const isHost = Boolean(hosting && window.desktop && window.desktop.setTurn);
+    $('#turn-form').hidden = !isHost;
+    $('#turn-guest-note').hidden = isHost;
+    if (isHost) {
+      try {
+        const cur = await window.desktop.getTurn();
+        if (cur) {
+          turnEls.urls.value = cur.urls.join('\n');
+          turnEls.user.value = cur.username || '';
+          turnEls.pass.value = cur.credential || '';
+        }
+      } catch { /* campos vazios */ }
+    }
+    startNetPolling();
   });
 
   // ---------- Escolher tela ou aplicativo (app de desktop) ----------

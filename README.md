@@ -53,3 +53,24 @@ brand.config.json   marca e configuração
 public/             site (index.html, style.css, app.js)
 desktop/main.js     app de desktop (Electron)
 ```
+
+## Não ouço / não vejo meus amigos
+
+**Plano B automático (v0.0.5):** se o caminho direto (P2P) não abrir em ~12 s, o app passa a repassar
+câmera, tela e voz **pelo servidor** (o mesmo link do chat). Funciona atrás de qualquer NAT, sem TURN.
+Custo: ~1 a 2 s de atraso, e quem hospeda gasta mais upload (uma cópia por pessoa que precisa do plano B).
+Em **Configurações → Rede** aparece "via servidor do app".
+
+### Melhor qualidade: servidor TURN
+
+Câmera, voz e tela vão **direto entre os PCs** (P2P). O link da Cloudflare só leva o chat e a sinalização.
+Em redes com NAT restritivo (CGNAT de operadora, 4G, algumas fibras) esse caminho direto não abre e o
+resultado é áudio mudo e vídeo preto. A solução é um servidor **TURN**, que repassa a mídia.
+
+1. Crie uma conta gratuita em um provedor TURN (por exemplo metered.ca) e copie os endereços, usuário e senha.
+2. No app de **quem hospeda**: Configurações → **Rede** → cole os dados → **Testar** → **Salvar para todos**.
+3. Todo mundo sai do canal e entra de novo (a lista é recarregada ao entrar).
+
+Em **Configurações → Rede** cada conexão mostra o estado, o caminho (direto ou via relay), os KB recebidos e
+os quadros de vídeo. Se ainda assim falhar, marque *Forçar relay* para testar só pelo TURN.
+Sem TURN, uma VPN (Radmin, Tailscale) também resolve, porque coloca todos na mesma rede.

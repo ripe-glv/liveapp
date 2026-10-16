@@ -42,6 +42,7 @@ async function startHosting() {
       await s.start();
       hostServer = s;
       hostPort = p;
+      applyTurn();
       return p;
     } catch (err) {
       lastErr = err;
@@ -49,6 +50,24 @@ async function startHosting() {
     }
   }
   throw lastErr;
+}
+
+// Servidor TURN (relay) escolhido por quem hospeda; vale para todos que entram neste servidor.
+// Sem ele, amigos atrás de NAT restritivo (CGNAT, 4G...) não recebem áudio nem vídeo.
+function cleanTurn(t) {
+  if (!t || typeof t !== 'object') return null;
+  const urls = (Array.isArray(t.urls) ? t.urls : String(t.urls || '').split(/[\s,]+/))
+    .map((u) => String(u).trim())
+    .filter((u) => /^(turns?|stuns?):[^\s]+$/i.test(u))
+    .slice(0, 8);
+  if (!urls.length) return null;
+  return { urls, username: String(t.username || '').slice(0, 200), credential: String(t.credential || '').slice(0, 400) };
+}
+
+function applyTurn() {
+  if (!hostServer) return;
+  const turn = cleanTurn(config.turn);
+  hostServer.setIceServers(turn ? [...brand.iceServers, turn] : null);
 }
 
 async function stopHosting() {
@@ -353,6 +372,21 @@ ipcMain.handle('app:info', (e) => {
     tunnelBusy,
     canTunnel: config.mode === 'host',
   };
+});
+
+ipcMain.handle('turn:get', (e) => {
+  if (!fromWindow(e) || config.mode !== 'host') return null;
+  return cleanTurn(config.turn);
+});
+
+ipcMain.handle('turn:set', (e, turn) => {
+  if (!fromWindow(e) || config.mode !== 'host') return { error: 'Só quem hospeda pode configurar.' };
+  const clean = turn ? cleanTurn(turn) : null;
+  if (turn && !clean) return { error: 'Informe pelo menos um endereço turn: ou turns:.' };
+  config.turn = clean || undefined;
+  saveConfig();
+  applyTurn();
+  return { ok: true };
 });
 
 ipcMain.handle('tunnel:start', async (e) => {
